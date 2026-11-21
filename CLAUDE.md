@@ -16,7 +16,7 @@ runs locally on **mock data**; the app doesn't upload (milestone 6 was skipped).
 - Milestones 1–5 are done, and verified on the test phone (an S21+, SM-G996U1, Android 15).
 - Milestone 6 (Firestore upload) was **skipped** by the user's decision.
 - Milestone 7 (portal) is done, but runs locally on mock data, with no Firebase Hosting.
-- Milestone 8 is partly done: the big Start/Stop and the state label exist, but **latency calibration is still open**.
+- Milestone 8 is done: big Start/Stop, state label, and latency validated by ear (see Milestones).
 - Added at the user's request after live walk tests: **Follow mode**, **Demo timing** (about a 1-minute cycle), and a
   tracking rework driven by real recordings (see the Pipeline section and the Gotchas).
 - **Music cue:** a user-provided song as the cue, its tempo locked to the beat clock (see Audio). Follow + Music
@@ -258,11 +258,12 @@ session:    { id, startedAt, durationSec, baselineSpm, finalSpm, peakSpm, meanCv
 5. ✅ `CueService` foreground service + live sensor + record-to-CSV. Tested on the phone with the screen off.
 6. ⏭ `SessionSummary` → Firestore. **Skipped.**
 7. ✅ Portal + seed script. Local and mock data, no Hosting.
-8. ◐ Demo polish: big Start/Stop ✅, clear state label ✅, latency calibration ✗.
+8. ✅ Demo polish: big Start/Stop ✅, clear state label ✅, latency ✅ (validated by ear; no calibration UI needed).
 
-**Open:** latency. `OUTPUT_LATENCY_MS` = `SPEAKER_LATENCY_MS` (12, a guess) + `DETECTOR_LAG_MS` (63). Sync % is
-measured around a learned offset, so only an ear test ("does the click land on the heel strike?") or a tap-along
-calibration can validate the absolute timing. If time is short, hard-code a value from an ear test.
+**Latency:** `OUTPUT_LATENCY_MS` = `SPEAKER_LATENCY_MS` (12) + `DETECTOR_LAG_MS` (63) = 75 ms. Validated by ear on
+2026-11-21: on a live walk with the phone at the lower back, the user confirmed the beat lands right on the heel
+strike. Sync % is measured around a learned offset, so only an ear test can validate the absolute timing. If you
+change the detector filter, the output path (Bluetooth adds 150–300 ms) or the phone, re-check by ear.
 
 ## Coding conventions
 - `gait/` and `cue/` stay free of Android imports, and so do `BeatClock`, `SimulatedWalker` and `GaitCuePipeline`.
