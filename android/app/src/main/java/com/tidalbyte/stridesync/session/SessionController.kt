@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.File
 
 /** A snapshot of the running session for the UI. */
 data class LiveState(
@@ -47,6 +48,10 @@ data class LiveState(
     /** Most recent first. */
     val recentEvents: List<CueEvent> = emptyList(),
     val sessionStartNs: Long = 0L,
+    /** The file name being recorded to, if recording. */
+    val recordingName: String? = null,
+    /** Set if the source failed (e.g. no accelerometer). */
+    val error: String? = null,
 )
 
 /**
@@ -60,6 +65,7 @@ class SessionController(private val scope: CoroutineScope) {
     val state: StateFlow<LiveState> = _state.asStateFlow()
 
     private var job: Job? = null
+    @Volatile private var sessionId = 0
 
     @Volatile private var engine: MetronomeEngine? = null
     @Volatile private var cueSound = CueSound.CLICK
@@ -69,10 +75,13 @@ class SessionController(private val scope: CoroutineScope) {
         engine?.setSound(sound)
     }
 
-    fun start(source: SensorSource) {
+    /** Starts a session on [source]. If [recordTo] is set, raw samples are also written there as CSV. */
+    fun start(source: SensorSource, recordTo: File? = null) {
         if (job?.isActive == true) return
-        _state.value = LiveState(running = true, sourceLabel = source.label)
-        SLog.i(TAG, "session start, source=${source.label}")
+        _state.value = LiveState(running = true, sourceLabel = source.label, recordingName = recordTo?.name)
+        SLog.i(TAG, "session start, source=${source.label}${recordTo?.let { ", recording to ${it.name}" } ?: ""}")
+        val recorder = recordTo?.let { SampleRecorder(it, scope) }
+        val id = ++sessionId
 
         val eng = MetronomeEngine().apply {
             setSound(cueSound)
@@ -91,6 +100,7 @@ class SessionController(private val scope: CoroutineScope) {
             var eventsSeen = 0
             try {
                 source.samples().collect { s ->
+                    recorder?.add(s)
                     if (startNs == Long.MIN_VALUE) {
                         startNs = s.tNanos
                         _state.update { it.copy(sessionStartNs = startNs) }
@@ -137,8 +147,16 @@ class SessionController(private val scope: CoroutineScope) {
                         }
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                SLog.e(TAG, "source failed", e)
+                _state.update { it.copy(error = e.message ?: e.toString()) }
             } finally {
+                recorder?.close()
                 eng.stop()
+                // The source ended or the session stopped. Don't clobber a newer session that has already started.
+                if (sessionId == id) _state.update { it.copy(running = false, cueBpm = null) }
                 val sy = pipe.syncStats
                 SLog.i(
                     TAG,

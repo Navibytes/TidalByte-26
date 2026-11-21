@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Notification icon: two footprints. Monochrome, as status-bar icons must be. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7,2.5c1.7,0 2.8,1.9 2.8,4.4S8.9,12 7.5,12 5,10 5,7.2 5.6,2.5 7,2.5zM5.3,13.2h4.2v2.1c0,1.2 -0.9,2.1 -2.1,2.1s-2.1,-0.9 -2.1,-2.1zM17,6.5c1.4,0 2,2.4 2,5.2s-1.1,5.1 -2.5,5.1 -2.3,-2.6 -2.3,-5.1S15.3,6.5 17,6.5zM14.5,17.8h4.2v2.1c0,1.2 -0.9,2.1 -2.1,2.1s-2.1,-0.9 -2.1,-2.1z" />
+</vector>

@@ -1,5 +1,10 @@
 package com.tidalbyte.stridesync.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -20,38 +25,62 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tidalbyte.stridesync.MainViewModel
 import com.tidalbyte.stridesync.audio.CueSound
 import com.tidalbyte.stridesync.cue.CueEvent
 import com.tidalbyte.stridesync.cue.CueState
 import com.tidalbyte.stridesync.session.LiveState
+import com.tidalbyte.stridesync.session.Placement
+import com.tidalbyte.stridesync.session.SourceKind
 
 @Composable
 fun HomeScreen(vm: MainViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    // Android 13+: ask once for notification permission (the session notification). Start either way.
+    val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { vm.start() }
+    val onStart = {
+        val needAsk = Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        if (needAsk) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS) else vm.start()
+    }
+    // A finished session may have produced a new recording.
+    LaunchedEffect(state.running) { if (!state.running) vm.refreshReplays() }
 
     Scaffold(
         bottomBar = {
             Button(
-                onClick = { if (state.running) vm.stop() else vm.start() },
+                onClick = { if (state.running) vm.stop() else onStart() },
+                enabled = state.running || vm.canStart,
                 modifier = Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
@@ -84,7 +113,7 @@ fun HomeScreen(vm: MainViewModel) {
                 )
             }
 
-            SourceCard(vm)
+            SourceCard(vm, state)
             StatusCard(state)
             if (state.recentEvents.isNotEmpty()) EventsCard(state)
 
@@ -102,23 +131,82 @@ fun HomeScreen(vm: MainViewModel) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SourceCard(vm: MainViewModel) {
+private fun SourceCard(vm: MainViewModel, state: LiveState) {
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp)) {
-            Text("Source: Simulated walker", style = MaterialTheme.typography.titleSmall)
-            Spacer(Modifier.height(6.dp))
-            Text("Natural cadence: %.0f spm".format(vm.simCadence), style = MaterialTheme.typography.bodyMedium)
-            Slider(value = vm.simCadence, onValueChange = vm::updateSimCadence, valueRange = 40f..140f)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "Walker follows the cue",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f),
-                )
-                Switch(checked = vm.walkerEntrains, onCheckedChange = vm::updateWalkerEntrains)
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Source", style = MaterialTheme.typography.titleSmall)
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                SourceKind.entries.forEachIndexed { i, kind ->
+                    SegmentedButton(
+                        selected = vm.sourceKind == kind,
+                        onClick = { vm.updateSourceKind(kind) },
+                        enabled = !state.running,
+                        shape = SegmentedButtonDefaults.itemShape(i, SourceKind.entries.size),
+                    ) { Text(kind.label) }
+                }
             }
+            when (vm.sourceKind) {
+                SourceKind.SIMULATED -> {
+                    Text("Natural cadence: %.0f spm".format(vm.simCadence), style = MaterialTheme.typography.bodyMedium)
+                    Slider(value = vm.simCadence, onValueChange = vm::updateSimCadence, valueRange = 40f..140f)
+                    LabeledSwitch("Walker follows the cue", vm.walkerEntrains, enabled = !state.running, onChange = vm::updateWalkerEntrains)
+                }
+                SourceKind.LIVE -> {
+                    Text(
+                        "Phone in a front trouser pocket or on a belt clip. The screen can be off. " +
+                            "Use the phone speaker or wired earbuds, not Bluetooth.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    LabeledSwitch("Record raw samples (CSV)", vm.record, enabled = !state.running, onChange = vm::updateRecord)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Placement", style = MaterialTheme.typography.bodyMedium)
+                        Placement.entries.forEach { p ->
+                            FilterChip(
+                                selected = vm.placement == p,
+                                onClick = { vm.updatePlacement(p) },
+                                enabled = !state.running,
+                                label = { Text(p.label) },
+                            )
+                        }
+                    }
+                    state.recordingName?.let {
+                        Text("Recording to $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                SourceKind.REPLAY -> {
+                    if (vm.replays.isEmpty()) {
+                        Text("No recordings yet. Record a Live walk first.", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        var open by remember { mutableStateOf(false) }
+                        Box {
+                            OutlinedButton(onClick = { open = true }, enabled = !state.running) {
+                                Text(vm.selectedReplay?.name ?: "Choose a recording")
+                            }
+                            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                                vm.replays.forEach { r ->
+                                    DropdownMenuItem(text = { Text(r.name) }, onClick = { vm.selectReplay(r); open = false })
+                                }
+                            }
+                        }
+                        Text(
+                            "A recording can't react to the cue, so replay shows real-data detection and locking, not entrainment.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+            state.error?.let { Text("Error: $it", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
         }
+    }
+}
+
+@Composable
+private fun LabeledSwitch(label: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
     }
 }
 
