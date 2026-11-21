@@ -2,201 +2,259 @@
 
 ## What this is
 StrideSync is an Android app for Parkinson's gait training using rhythmic auditory cueing. The phone's accelerometer
-(in a pocket or on a belt clip) detects heel strikes. A generated metronome/beat locks onto the walker's cadence and
-phase. Then it slowly raises the tempo to lengthen the stride. Session results sync to Firebase, and a therapist web
-portal shows cadence, consistency and trends.
+(ideally at the lower back) detects steps. A generated metronome/beat locks onto the walker's cadence and phase. Then
+it slowly raises the tempo to lengthen the stride. A therapist web portal shows cadence, consistency and trends. It
+runs locally on **mock data**; the app doesn't upload (milestone 6 was skipped).
 
 **Context: 24-hour solo hackathon prototype.** It will not be used with real patients. So:
 - Optimize for a working end-to-end demo over polish, completeness or architecture purity.
-- Ignore HIPAA, PHI handling, regulatory and medical-device concerns. Firestore test-mode rules are fine.
-- Show one line in the app's UI: "Prototype — not a medical device."
+- Ignore HIPAA, PHI handling, regulatory and medical-device concerns.
+- Show one line in the app's UI: "Prototype — not a medical device." (The portal shows it too.)
 - Don't add features beyond the milestones below without asking.
 
+## Status (2026-11-21)
+- Milestones 1–5 are done, and verified on the test phone (an S21+, SM-G996U1, Android 15).
+- Milestone 6 (Firestore upload) was **skipped** by the user's decision.
+- Milestone 7 (portal) is done, but runs locally on mock data, with no Firebase Hosting.
+- Milestone 8 is partly done: the big Start/Stop and the state label exist, but **latency calibration is still open**.
+- Added at the user's request after live walk tests: **Follow mode**, **Demo timing** (about a 1-minute cycle), and a
+  tracking rework driven by real recordings (see the Pipeline section and the Gotchas).
+
 ## Stack
-- **Android:** Kotlin, Jetpack Compose, coroutines/Flow, `SensorManager`, `AudioTrack`. Target device is a Samsung
-  Galaxy S21 (One UI). minSdk 29, target/compile the latest stable SDK installed.
-- **Backend:** Firebase: Anonymous Auth, Firestore (offline persistence on), Hosting.
-- **Portal:** Static site on Firebase Hosting: Vite + vanilla TypeScript + Chart.js + Firebase JS SDK.
-  (Claude picked this for speed. Swap it if you prefer React.)
+- **Android:** Kotlin, Jetpack Compose, coroutines/Flow, `SensorManager`, `AudioTrack`.
+  - Package `com.tidalbyte.stridesync`. minSdk 29, targetSdk 37.
+  - compileSdk 37.2, because Compose BOM 2026.11.01 needs ≥37.1.
+  - AGP 9.5.2 (built-in Kotlin: don't apply `kotlin-android`), Kotlin 2.4.21, Gradle 9.9.2.
+- **Backend:** none. Firebase isn't used.
+- **Portal:** Vite 8 + vanilla TypeScript 7 + Chart.js 4. Static and local; it reads `portal/src/data/mock-data.json`.
 - **No:** ExoPlayer/Media3, Rubber Band, SoundTouch, time-stretching, streaming services, Hilt/Dagger (wire things
-  by hand), or Room (unless needed for a session queue).
+  by hand), or Room.
 
 The audio is a **synthesized metronome/beat**, not music. That means tempo and phase are fully controllable,
-there are no stretch artifacts, and beats can be placed sample-accurately. Ignore the time-stretching and
-song-switching parts of any older design notes.
+there are no stretch artifacts, and beats can be placed sample-accurately.
 
-## Repo layout
+## Repo layout (as built)
 ```
-android/                     Android Studio project
-  app/src/main/java/.../stridesync/
-    sensor/    SensorSource interface; LiveAccelSource, ReplaySource (CSV), SimulatedWalker
-    gait/      StepDetector, CadenceEstimator, GaitStats        ← pure Kotlin, no android.* imports
-    cue/       PhaseLockedLoop, RampController, CueState        ← pure Kotlin, no android.* imports
-    audio/     MetronomeEngine (AudioTrack), ClickSynth
-    session/   SessionController (wires everything), SessionRecorder, SessionSummary
-    service/   CueService (foreground service)
-    data/      FirestoreRepo
-    ui/        Compose screens: Home, LiveSession, Summary, Debug
-    Tuning.kt  every tunable constant lives here, documented
-  app/src/test/   JVM unit tests for gait/ and cue/
-  app/src/main/assets/replays/   recorded/synthetic accelerometer CSVs
-portal/                      therapist web portal
-firebase/                    firebase.json, firestore.rules, firestore.indexes.json
-tools/                       seed_portal.mjs (fake patient history), gen_gait.py (optional)
+android/app/src/main/java/com/tidalbyte/stridesync/
+  sensor/   SensorSource + AccelSample; LiveAccelSource; ReplaySource (+ReplayRef); AccelCsv;
+            SimulatedWalker (pure Kotlin); SimulatedWalkerSource (real-time wrapper)
+  gait/     StepDetector, CadenceEstimator, GaitStats, Biquad                     ← pure Kotlin
+  cue/      PhaseLockedLoop (+Coupling), RampController (+CueState, RampTiming), SyncTracker, CueOutput  ← pure Kotlin
+  audio/    MetronomeEngine (AudioTrack; implements CueOutput), BeatClock (pure Kotlin scheduler/mixer), ClickSynth
+  session/  GaitCuePipeline (pure Kotlin: detector → cadence → PLL → ramp → cue), SessionController (Android
+            wiring, LiveState), SessionHub (the process-wide controller + SourceSpec), SampleRecorder (CSV)
+  service/  CueService (foreground service, type mediaPlayback)
+  ui/       HomeScreen (the only screen), Theme
+  Tuning.kt every tunable constant, documented with units and rationale
+  Log.kt    SLog: one tag "StrideSync", messages start with "[component]"
+android/app/src/test/      JVM tests: gait/, cue/, audio/, sensor/, session/ (closed-loop)
+android/app/src/main/assets/replays/   real recorded walks (front pocket, lower back): Replay demos + test fixtures
+portal/                    Vite app: src/{main,charts,data,dom}.ts, src/views/*, src/data/mock-data.json
+tools/seed_portal.mjs      generates portal/src/data/mock-data.json
 ```
+Not built: `data/FirestoreRepo`, `SessionRecorder`/`SessionSummary`, `firebase/`, and separate
+LiveSession/Summary/Debug screens. The Record toggle lives on Home.
 
 ## Commands
 ```bash
-# Android (from android/)
-./gradlew assembleDebug
-./gradlew installDebug
-./gradlew testDebugUnitTest
-adb logcat -s StrideSync:*            # all app logs use tag prefix "StrideSync"
-adb pull /sdcard/Android/data/<pkg>/files/recordings/ ./recordings/
+# Android (from android/). The JDK and SDK are user-space installs, not on PATH:
+export JAVA_HOME=~/.local/jdks/current ANDROID_HOME=~/Android/Sdk PATH=$PATH:$HOME/Android/Sdk/platform-tools
+./gradlew testDebugUnitTest assembleDebug installDebug
+adb logcat -s StrideSync:*      # components: step, pll, ramp, cue, audio, sensor, service, session, record, replay
+adb pull /sdcard/Android/data/com.tidalbyte.stridesync/files/recordings/ ./recordings/
 
 # Portal (from portal/)
-npm install && npm run dev
-npm run build
-
-# Firebase (from repo root)
-firebase deploy --only hosting,firestore
-node tools/seed_portal.mjs            # writes demo patients + ~3 weeks of sessions
+npm install && npm run dev      # http://localhost:5173
+npm run build && npm run preview
+npm run seed                    # = node ../tools/seed_portal.mjs. Rerun on demo day so "today" is current.
 ```
 
 ## Pipeline (data flow)
 ```
-SensorSource ──samples──▶ StepDetector ──step times──▶ CadenceEstimator ──spm, CV──┐
-                                    │                                               ▼
-                                    └──step times──▶ PhaseLockedLoop ◀── RampController (target tempo)
-                                                           │
-                                                           ▼ beat period + phase
-                                                    MetronomeEngine (AudioTrack)
-SessionRecorder taps every stage → SessionSummary → FirestoreRepo (uploaded at session end)
+SensorSource ─samples─▶ StepDetector ─steps─▶ CadenceEstimator ─spm (2-step intervals), stride CV─┐
+                              │                                                                    │
+                              └─steps─▶ PhaseLockedLoop ◀── pair-averaged error − learned offset   │
+                                             │ phase shift                                         ▼
+                                             ▼                        RampController: tempo = FLL from cadence
+                                   CueOutput = MetronomeEngine        while the beat follows; ramp ladder while
+                                   (BeatClock + AudioTrack)           it leads; hard caps in capBpm()
 ```
-`SessionController` owns the pipeline. `CueService` hosts it so it survives screen-off. The UI observes a
-`StateFlow<LiveState>`.
+`GaitCuePipeline` (pure Kotlin) contains all of this and runs identically on the device and in JVM closed-loop tests,
+which drive a virtual BeatClock. `SessionController` hosts it on a coroutine. `SessionHub` owns the single controller.
+`CueService` runs it in the foreground, so it survives screen-off. The UI observes `StateFlow<LiveState>`.
 
 ### 1. Sensor input — `sensor/`
-- `SensorSource` emits `AccelSample(tNanos, x, y, z)` as a Flow. All three sources go through the same
-  pipeline, which is what makes replay and simulation trustworthy.
-- `LiveAccelSource`: `TYPE_ACCELEROMETER` at `samplingPeriodUs = 10_000` (~100 Hz; under the Android 12+ 200 Hz cap
-  so no extra permission). Use `event.timestamp`, never arrival time. Delivery is irregular and batched.
-- `ReplaySource`: plays a CSV (`t_ns,ax,ay,az`) from assets in real time, or faster in tests.
-- `SimulatedWalker`: synthesizes a gait signal (configurable cadence, amplitude, noise, drift, and freeze
-  episodes). It **partially entrains to the cue**: its cadence moves toward the current beat tempo with a time
-  constant of ~10 s and some phase jitter, so the full lock→ramp behavior can be demoed at a desk.
-- The Debug screen has a "Record" toggle that writes live samples to CSV for later replay.
+- All sources emit `AccelSample(tNanos, x, y, z)` (elapsedRealtime nanos) through the same pipeline.
+- `LiveAccelSource`: `TYPE_ACCELEROMETER` at `SENSOR_PERIOD_US = 5_000` (200 Hz, the cap without the extra
+  permission; the S21's LSM6DSO delivers ~200 Hz). Callbacks run on a HandlerThread. It uses `event.timestamp`.
+- `ReplaySource`: plays `t_ns,ax,ay,az` CSVs from `assets/replays/` or the phone's recordings, rebased to now. A
+  recording can't react to the cue, so Replay shows detection and locking, not entrainment.
+- `SimulatedWalker`:
+  - **Signal:** a deterministic synthetic gait signal with ground-truth strike times. Options include freezes with
+    tremor and `farStepDelaySec` (the front-pocket artifact).
+  - **Entrainment:** it **partially entrains** to *audible* beats: tempo pull (τ 10 s, strength 0.9), per-step
+    phase correction (α 0.3), reduced drift while cued, and a hard ability ceiling (natural +6%), so an overreach is
+    real. Deliberate pace (the slider) changes within a few steps.
+  - **Follow mode:** the simulated walker uses strength 0.3 / α 0.05 so it leads.
+- **Recording:** a "Record raw samples" switch on Home (Live only). The Pocket / Lower back / Belt clip chip goes
+  in the file name.
 
 ### 2. Step detection — `gait/StepDetector`
-- Use the magnitude √(x²+y²+z²) to reduce orientation dependence. Remove gravity with a moving mean or
-  high-pass, then low-pass at ~4 Hz (biquad).
-- Peak detection with an adaptive threshold (a fraction of the recent peak amplitude) and a refractory period.
-- **Parkinson's gait is slow, shuffling and low-amplitude.** Thresholds must handle weak heel strikes, and
-  cadence may be well under typical walking values. Don't hard-code healthy-gait assumptions. Test with
-  low-amplitude synthetic signals.
-- The detected peak lags the true heel strike by a roughly constant amount. Absorb that in the latency offset
-  (see Gotchas) rather than trying to model it.
+- The chain:
+  1. magnitude;
+  2. a uniform 200 Hz resample;
+  3. a gravity EMA (2 s);
+  4. a 4 Hz biquad low-pass;
+  5. local maxima with parabolic sub-sample timing.
+- **Threshold:** 0.3 × the median of the last 6 peak heights, decaying after the last step down to a 0.35 floor.
+  At 0.4, real pocket walks locked into one step per stride (weak far-foot peaks dropped out → half cadence).
+- **Refractory:** a candidate is held as *pending*, and a higher peak within the refractory replaces it. The
+  refractory is clamp(0.45 × the 75th percentile of recent intervals, 250–500 ms); the percentile is what blocks
+  push-off double counts.
+- Parkinson's gait is slow, shuffling and low-amplitude. Don't hard-code healthy-gait assumptions.
+- The detected peak lags the heel strike by a near-constant ~63 ms (`DETECTOR_LAG_MS`).
 
 ### 3. Cadence — `gait/CadenceEstimator`
-- spm = 60 / median(last N inter-step intervals), N ≈ 8. Reject intervals outside a plausible range.
-- Consistency = coefficient of variation (CV) of the intervals. Report it. It's a key therapist metric.
-- FFT cross-checking is optional and out of scope unless step detection proves unreliable.
+- **Two-step intervals** (t[k] − t[k−2], one stride). A long + short pair cancels left/right alternation exactly.
+- spm = 120 / median(last 6). `fastSpm` = the median of the last 3.
+- CV = **stride-time CV** over the last 10 (the clinical variability measure).
 
-### 4. Phase lock — `cue/PhaseLockedLoop`
-- For each step, phase error = step time − nearest beat time, wrapped to ±period/2.
-- PI-style correction: shift upcoming beats by `kP·error` and nudge the period by `kI·error`. Clamp both per beat
-  (e.g., ≤5% of the period) so the beat never lurches.
-- **Coupling strength depends on state.** Use strong coupling while locking, because the beat follows the
-  walker. Use weak coupling while ramping, because the beat must *lead* the walker. If it keeps following, it
-  can't pull cadence up.
-- Sync metrics: mean absolute asynchrony (ms), and the % of steps within ±`Tuning.SYNC_WINDOW_MS`.
+### 4. Phase lock and tempo following — `cue/PhaseLockedLoop`, `session/GaitCuePipeline`
+- **Error:** step − nearest beat. Listed beats are ground truth; the grid is extrapolated past the last one.
+- **Pair averaging:** each error is averaged with the previous step's error, re-expressed after the shift that
+  followed it.
+- **Learned offset:** an EMA over 8 steps, learned only from steps within ±120 ms of it, clamped to ±100 ms. It's
+  learned **only while the beat follows** and frozen while it leads. It's subtracted before correction and before
+  the sync judgment.
+- **Phase correction:** kP × (the error beyond a ±25 ms dead band), clamped per beat (5% of the period; 10% in
+  Follow). **kI = 0.**
+- **Tempo while the beat follows** (LOCKING, Follow) comes from measured cadence, an FLL closing 50% of the gap per
+  step. Follow jumps to `fastSpm` on a >4% disagreement sustained for 2 steps. While leading, the ramp sets the tempo.
+- **Couplings:**
+  - ACQUIRE: muted, unclamped, kP 0.7.
+  - LOCK: kP 0.5.
+  - FOLLOW: kP 0.5, 10% clamp, and a one-off **re-sync jump** when the error stays over 25% of a period for 2 steps.
+  - LEAD: kP 0.1.
+- **Why not an integrating PI loop:** the walker follows the beat while the beat follows the walker, so any constant
+  bias (a wrong latency, the placement artifact) makes them chase each other and the tempo drifts without bound.
+- **Sync metrics:**
+  - % of steps within ±max(60 ms, 8% of the period). The window scales with tempo, as chosen by the user.
+  - mean |asynchrony|.
+  - Rolling window: 16 steps (8 in demo timing).
 
-### 5. Ramp — `cue/RampController` (automatic, with hard caps)
-State machine. Log every transition, and show it in the UI and the session summary.
-- `CALIBRATING`: no cue (or a soft cue). Measure baseline cadence over the first ~20 steps.
-- `LOCKING`: cue at baseline, strong phase coupling. Go to RAMPING after a sustained period in sync.
-- `RAMPING`: raise the tempo by `RAMP_STEP_PCT` per step, holding each step for `RAMP_HOLD_SEC`. Only advance
-  if still in sync.
-- `HOLDING`: at the cap, or while sync is marginal.
-- `STEPPING_BACK`: sync lost → drop one ramp step and return to HOLDING.
-- `PAUSED`: no steps for ~3 s (a possible freeze or stop) → freeze the tempo and **never** increase it. Keep
-  the beat playing steadily, because cues can help a walker restart. Resume HOLDING when steps return.
-- **Hard caps, enforced in one place and unit-tested:** max tempo = baseline × (1 + `MAX_RAMP_PCT`), plus an
-  absolute ceiling. Ramp increments can never exceed `RAMP_STEP_PCT`. A sudden cadence drop (>~15%) also
-  triggers STEPPING_BACK.
+### 5. Ramp — `cue/RampController`
+- **States:**
+  - CALIBRATING: silent; 20 steps; baseline from two-step intervals.
+  - LOCKING: muted acquisition until 2 in-window steps, then audible; ramping needs `lockMinSec` plus a full in-sync
+    window.
+  - RAMPING: +2% per hold while sync ≥ 80%.
+  - HOLDING: marginal sync, at the cap, or after a settle.
+  - STEPPING_BACK: sync < 50% or a cadence drop >15% → one level down, 20 s settle.
+  - PAUSED: no steps for 3 s → tempo frozen, beat continues.
+- **Deviations from the original spec, all intentional:**
+  - The settle is 20 s, not 10 s. At 10 s the walker's re-adaptation was judged "lost" and the ramp cascaded down.
+  - The rolling sync window restarts after any tempo command, at the end of a settle, and on resume.
+  - Lost sync at the base tempo → re-LOCK.
+  - PAUSED during LOCKING resumes LOCKING.
+- **Hard caps, only in `capBpm()`/`rampUpFrom()`:** ≤ baseline × 1.10 and ≤ 130 bpm absolute (Follow: 130 only);
+  each increase ≤ +2%; only RAMPING raises the tempo. Fuzz-tested.
+- **`RampTiming.DEMO`:** 8-step calibration, 8 s lock minimum, 10 s holds, 6 s settle, 8-step window. The full cycle
+  takes about a minute. On by default via the "Demo timing" switch.
+- **Follow mode** (`followOnly`): 4-step calibration, then it stays in LOCKING (shown as "FOLLOWING") and never ramps.
 
-### 6. Audio — `audio/MetronomeEngine`
-- `AudioTrack`, 48 kHz mono 16-bit PCM, `MODE_STREAM`, `USAGE_MEDIA`, with a dedicated writer thread.
-- Beats are placed at exact sample frames. `ClickSynth` precomputes 2–3 sounds (a click, a woodblock, a soft
-  kick) as short enveloped bursts.
-- Keep write-ahead small (~100 ms) so tempo and phase changes apply quickly. Changes only affect beats not yet
-  written.
-- Expose `beatTimes` (predicted and actual, in the shared timebase) so the PLL can compare them against steps.
+### 6. Audio — `audio/`
+- **BeatClock** (pure Kotlin):
+  - Places beats on exact sample frames, with no drift.
+  - Tempo and phase changes affect only unwritten beats and are slew-limited per beat. The limits are lifted while
+    muted and for a one-off re-sync.
+- **MetronomeEngine:**
+  - 48 kHz mono 16-bit `MODE_STREAM` `USAGE_MEDIA`, with an URGENT_AUDIO writer thread.
+  - 240-frame chunks and ~100 ms of write-ahead.
+  - Every beat is flagged audible or muted.
+  - Sounds: click and woodblock.
 
-### 7. Session + reporting
-- `SessionSummary`: start, duration, baseline/final/peak spm, mean CV, sync %, mean asynchrony, ramp-step count,
-  state-transition events, and a downsampled series (one point per 5 s: `t, spm, cueBpm, asyncMs, cv, state`).
-- Upload once at session end. Firestore offline persistence handles bad connectivity.
+### 7. Session and reporting
+- `SessionSummary` and the upload aren't built (milestone 6 was skipped).
+- The session end logs one `[session]` line: state, baseline, ramp steps, sync %, mean asynchrony.
 
-## Firestore schema
+## Data schema (mock data = the planned Firestore documents)
 ```
-patients/{patientId}                    { displayName, createdAt, latestBaselineSpm }
-patients/{patientId}/sessions/{id}      { startedAt, durationSec, baselineSpm, finalSpm, peakSpm,
-                                          meanCv, syncPct, meanAsyncMs, rampSteps,
-                                          events: [{t, from, to, reason}],
-                                          series: [{t, spm, cueBpm, asyncMs, cv, state}] }
+patients[]: { id, displayName, createdAt, latestBaselineSpm, sessions[] }
+session:    { id, startedAt, durationSec, baselineSpm, finalSpm, peakSpm, meanCv, syncPct, meanAsyncMs, rampSteps,
+              events: [{t, from, to, reason}],
+              series: [{t, spm, cueBpm, asyncMs, cv, state}] }      // one point per 5 s
 ```
-Keep session docs well under the 1 MB limit (the 5 s downsampling handles this). The app picks the patient
-from a dropdown. There's no real therapist auth: the portal reads everything.
 
-## Portal
-- Patient list → patient page with trend charts across sessions (baseline vs final cadence, CV, sync %).
-- Session detail: cadence and cue tempo over time on one chart, with state bands shaded.
-- `tools/seed_portal.mjs` generates believable history: ~15 sessions over 3 weeks with gradual improvement,
-  noise, and a bad day or two.
+## Portal (as built)
+- **Patients list → patient page → session page:**
+  - Patient page: KPI tiles; baseline vs with-cue cadence; % in sync; stride CV; a sessions table.
+  - Session page: cadence + cue tempo on one axis (same unit) with labeled state bands; asynchrony with the
+    ±60 ms band; the event log.
+- **Every chart:** a Chart/Table toggle and a crosshair tooltip. Light/dark follows `prefers-color-scheme`. Colors
+  are the dataviz reference palette, validated.
+- **`tools/seed_portal.mjs`:**
+  - Runs a simplified ramp state machine per session.
+  - 4 **fictional** patients, about 3 weeks, gradual improvement, bad days.
+  - Eleanor V. has a session dated today for the demo finish.
+  - Deterministic for a given day (`SEED_TODAY=YYYY-MM-DD`).
 
-## Demo plan (both modes must work)
-1. **Replay/sim mode (primary):** the Home screen has a source picker (Live / Replay file / Simulated walker).
-   The simulated walker shows lock → ramp → step-back live, and the audio and UI behave exactly as in live mode.
-2. **Live:** walk with the phone in a pocket. Use the phone speaker or wired earbuds, not Bluetooth.
-3. Finish on the portal, showing the session just uploaded alongside the seeded history.
+## Demo plan
+1. **Simulated walker:**
+   - Ramp + Demo timing: calibrate → lock → ramp → overreach → step-back in about 1 minute.
+   - Follow mode + the cadence slider shows tracking.
+2. **Replay:** a bundled real walk (a lower-back one is cleanest).
+3. **Live:**
+   - Put the phone **pressed flat or tucked at the lower back**. That gave 70–82% sync in tests; pockets gave
+     50–68%.
+   - Use the phone speaker or wired earbuds (not Bluetooth), media volume up, battery set to Unrestricted.
+4. **Portal:** `npm run dev`, then finish on Eleanor V.'s session from today. It's mock data; the app doesn't upload.
 
-## Milestones (build in this order; each must run before starting the next)
-1. `SimulatedWalker` + `StepDetector` + `CadenceEstimator`, with unit tests and spm on screen.
-2. `MetronomeEngine` at a fixed BPM, then following measured cadence.
-3. `PhaseLockedLoop` and sync metrics.
-4. `RampController` with caps and tests. Entraining simulated walker.
-5. `CueService` foreground service + live sensor + record-to-CSV. Test on the S21 with the screen off.
-6. `SessionSummary` → Firestore.
-7. Portal + seed script, deployed to Hosting.
-8. Demo polish: big Start/Stop, clear state label, latency calibration.
+## Milestones
+1. ✅ `SimulatedWalker` + `StepDetector` + `CadenceEstimator`, with unit tests and spm on screen.
+2. ✅ `MetronomeEngine` at a fixed BPM, then following measured cadence.
+3. ✅ `PhaseLockedLoop` and sync metrics.
+4. ✅ `RampController` with caps and tests. Entraining simulated walker.
+5. ✅ `CueService` foreground service + live sensor + record-to-CSV. Tested on the phone with the screen off.
+6. ⏭ `SessionSummary` → Firestore. **Skipped.**
+7. ✅ Portal + seed script. Local and mock data, no Hosting.
+8. ◐ Demo polish: big Start/Stop ✅, clear state label ✅, latency calibration ✗.
 
-**Cut list if behind (cut in this order):** latency-calibration UI (hard-code it instead) → multiple click
-sounds → portal session-detail page → screen-off support. Never cut: replay/sim mode or ramp caps.
+**Open:** latency. `OUTPUT_LATENCY_MS` = `SPEAKER_LATENCY_MS` (12, a guess) + `DETECTOR_LAG_MS` (63). Sync % is
+measured around a learned offset, so only an ear test ("does the click land on the heel strike?") or a tap-along
+calibration can validate the absolute timing. If time is short, hard-code a value from an ear test.
 
 ## Coding conventions
-- `gait/` and `cue/` stay free of Android imports. They take timestamps as `Long` nanos, which makes them
-  fully JVM-testable and deterministic.
-- All tunables live in `Tuning.kt` with a comment giving units and rationale. They're starting guesses meant to
-  be tuned, so don't scatter magic numbers. Starting values: `RAMP_STEP_PCT = 0.02`, `RAMP_HOLD_SEC = 45`,
-  `MAX_RAMP_PCT = 0.10`, `SYNC_WINDOW_MS = 60`, `SYNC_REQUIRED_PCT = 0.8`.
-- Tests: JVM unit tests for detector accuracy (step times within ±20 ms on synthetic data), cadence, PLL
-  convergence, and every RampController transition and cap. No instrumentation tests.
-- Prefer small, working increments. After each milestone, run `testDebugUnitTest` and `assembleDebug`.
-- Log state transitions and per-step phase error at debug level under the `StrideSync` tag prefix.
+- `gait/` and `cue/` stay free of Android imports, and so do `BeatClock`, `SimulatedWalker` and `GaitCuePipeline`.
+  Timestamps are `Long` nanos.
+- All tunables live in `Tuning.kt`, with units and rationale (including why a value changed). Don't scatter magic
+  numbers.
+- **Tests (JVM only, ~77):**
+  - detector accuracy on synthetic gait (±20 ms, including weak, slow, freeze, irregular and pocket-artifact cases);
+  - cadence/CV;
+  - PLL;
+  - every RampController transition and cap, plus a fuzz test;
+  - closed loop (walker → pipeline → virtual BeatClock): demo cycle, Follow tracking, latency mismatch (no drift),
+    pocket artifact, no step-back cascade, never above the cap;
+  - real recordings vs autocorrelation.
+- **Tuning against real data:** replay the recordings through `GaitCuePipeline` offline (seconds, not minutes on the
+  device), and compare with the non-causal "oracle" sync bound before changing the algorithm. The current pipeline
+  matches the oracle on every recording, so the remaining loss is the data.
+- After a change, run `testDebugUnitTest` and `assembleDebug`, then install and check on the device.
+- Log state transitions and per-step phase error at debug level.
 
 ## Gotchas
-- **Two clocks.** `SensorEvent.timestamp` uses the elapsedRealtime (boot-time) base. `AudioTrack.getTimestamp()`
-  returns `nanoTime` (monotonic). Convert everything to elapsedRealtime nanos with an offset sampled once at
-  session start: `SystemClock.elapsedRealtimeNanos() - System.nanoTime()`. Mixing the two breaks phase lock.
-- **Output latency.** Beats are heard after they're written. Compute played-frame time from `getTimestamp()`,
-  then add `Tuning.OUTPUT_LATENCY_MS`, which also covers the peak-vs-heel-strike lag. Bluetooth adds roughly
-  150–300 ms and varies, so use the speaker or wired audio for the demo. Optional: a "tap along" calibration.
-- **Foreground service:** type `mediaPlayback` with an ongoing notification. Needs `FOREGROUND_SERVICE`,
-  `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, and `POST_NOTIFICATIONS` (runtime request, Android 13+). Start sensors
-  inside the service, not the Activity.
-- **Samsung battery management:** set the app to Unrestricted battery use and keep it out of Sleeping/Deep
-  sleeping apps (Settings → Battery → Background usage limits). Otherwise sensors stop at screen-off.
-- `ACTIVITY_RECOGNITION` isn't needed for raw `TYPE_ACCELEROMETER`. Only request it if you use
-  `TYPE_STEP_DETECTOR` as a cross-check.
-- Phone placement changes the signal a lot. Test both pocket and belt clip, and record a replay CSV of each.
+- **Two clocks.** `SensorEvent.timestamp` uses the elapsedRealtime base. `AudioTrack.getTimestamp()` uses `nanoTime`.
+  Convert with an offset sampled once at start: `SystemClock.elapsedRealtimeNanos() - System.nanoTime()`.
+- **Output latency.** Beat time = `getTimestamp()` presentation time + `OUTPUT_LATENCY_MS`. That includes the
+  detector lag, because the PLL compares against *detected* steps. Bluetooth adds 150–300 ms, so don't use it.
+- **Placement dominates accuracy.** A front-pocket thigh sees one leg strongly: detected intervals alternate
+  ~750/375 ms around a true ~560. Two-step cadence and pair-averaged errors handle it, but per-step timing scatter
+  still caps sync near 60%. The lower back is clearly best.
+- **Mutual chase.** A beat that follows a walker who follows the beat drifts under any constant bias. That's why the
+  tempo comes from cadence (FLL), plus the dead band and the learned offset (frozen while leading).
+- **Foreground service:** type `mediaPlayback`, an ongoing silent notification (IMPORTANCE_LOW), a partial wake lock.
+  Sensors register inside the service. Request `POST_NOTIFICATIONS` at the first Start. Verified working with the
+  screen off.
+- **Samsung battery:** set the app to Unrestricted and keep it out of Sleeping apps, or sensors stop at screen-off.
+- `ACTIVITY_RECOGNITION` isn't needed for raw `TYPE_ACCELEROMETER`.
+- **Mock data:** the portal's patients are fictional. Keep the "Demo data / fictional" labels.

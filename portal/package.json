@@ -1,0 +1,19 @@
+{
+  "name": "stridesync-portal",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "seed": "node ../tools/seed_portal.mjs"
+  },
+  "dependencies": {
+    "chart.js": "4.6.1"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
+  }
+}
