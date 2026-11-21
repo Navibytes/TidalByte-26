@@ -2,6 +2,7 @@ package com.tidalbyte.stridesync.session
 
 import com.tidalbyte.stridesync.Tuning
 import com.tidalbyte.stridesync.cue.CueState
+import com.tidalbyte.stridesync.cue.RampTiming
 import com.tidalbyte.stridesync.cue.VirtualMetronome
 import com.tidalbyte.stridesync.gait.GaitEval
 import com.tidalbyte.stridesync.sensor.FreezeEpisode
@@ -33,21 +34,51 @@ class GaitCuePipelineTest {
         val firstAudibleNs: Long?,
         /** (time, bpm) whenever the cue tempo changed during a freeze window, if one was given. */
         val tempoDuringFreeze: List<Double>,
+        /** (time s, cue bpm) once per second. */
+        val cueTrace: List<Pair<Double, Double>>,
+        /** (time s, walker's actual cadence from its true strikes) once per second. */
+        val walkerTrace: List<Pair<Double, Double>>,
     )
 
-    private fun run(config: WalkerConfig, seconds: Double, freeze: FreezeEpisode? = null): Run {
+    /**
+     * [heardOffsetNs] makes the walker hear each beat this much later than the app assumes. That models a
+     * wrong OUTPUT_LATENCY_MS, a constant bias the app must not chase. [events] runs once per second.
+     */
+    private fun run(
+        config: WalkerConfig,
+        seconds: Double,
+        freeze: FreezeEpisode? = null,
+        timing: RampTiming = RampTiming(),
+        followOnly: Boolean = false,
+        heardOffsetNs: Long = 0L,
+        events: (tSec: Double, walker: SimulatedWalker) -> Unit = { _, _ -> },
+    ): Run {
         val walker = SimulatedWalker(config, start)
         val cue = VirtualMetronome(start, initialBpm = Tuning.CUE_DEFAULT_BPM, latencyNs = latencyNs, muted = true)
-        walker.beatSource = { cue.audibleBeatFrameTimes }
-        val pipe = GaitCuePipeline(cue)
+        walker.beatSource = { cue.audibleBeatFrameTimes.map { it + heardOffsetNs } }
+        val pipe = GaitCuePipeline(cue, timing, followOnly)
         val reports = ArrayList<StepReport>()
         var maxBpm = 0.0
         var firstAudible: Long? = null
         val freezeTempos = ArrayList<Double>()
+        val trace = ArrayList<Pair<Double, Double>>()
+        val wTrace = ArrayList<Pair<Double, Double>>()
+        var lastSec = -1
         val end = start + (seconds * sec).toLong()
         while (walker.nextSampleNanos < end) {
             val s = walker.next()
             cue.advanceTo(s.tNanos)
+            val tSec = (s.tNanos - start) / 1e9
+            if (tSec.toInt() != lastSec) {
+                lastSec = tSec.toInt()
+                events(tSec, walker)
+                trace += tSec to pipe.cueBpm
+                val past = walker.trueStrikes.filter { it <= s.tNanos }.takeLast(5)
+                if (past.size == 5) {
+                    val strides = (2 until 5).map { past[it] - past[it - 2] }.sorted()
+                    wTrace += tSec to 120e9 / strides[1]
+                }
+            }
             reports += pipe.onSample(s)
             if (!cue.muted) {
                 maxBpm = maxOf(maxBpm, pipe.cueBpm)
@@ -58,7 +89,7 @@ class GaitCuePipelineTest {
                 if (t >= freeze.startSec + Tuning.PAUSE_SEC + 1 && t < freeze.startSec + freeze.durationSec) freezeTempos += pipe.cueBpm
             }
         }
-        val r = Run(walker, cue, pipe, reports, maxBpm, firstAudible, freezeTempos)
+        val r = Run(walker, cue, pipe, reports, maxBpm, firstAudible, freezeTempos, trace, wTrace)
         println(summary(r, config))
         return r
     }
@@ -154,7 +185,9 @@ class GaitCuePipelineTest {
         val baseline = ramp.baselineSpm!!
         val t = r.transitions()
         assertTrue("backed off: $t", t.any { it.second == CueState.STEPPING_BACK || it.second == CueState.LOCKING && it.first != CueState.CALIBRATING })
-        assertTrue("max cue ${r.maxCueBpm}", r.maxCueBpm <= baseline * (1 + Tuning.RAMP_STEP_PCT) + 0.5)
+        // The ramp never got past its first step (the cue may still follow the walker's own wander while LOCKING).
+        assertTrue("climbed past one step: ${ramp.events.map { it.reason }}", ramp.events.none { it.reason.startsWith("ramp step 2") })
+        assertTrue("max cue ${r.maxCueBpm} vs baseline $baseline", r.maxCueBpm <= baseline * 1.06)
     }
 
     @Test
@@ -185,5 +218,112 @@ class GaitCuePipelineTest {
         val t = r.transitions()
         assertTrue("reached RAMPING: $t", (CueState.LOCKING to CueState.RAMPING) in t)
         assertTrue("never above cap", r.maxCueBpm <= r.pipe.ramp.maxBpm + 1e-6)
+    }
+
+    // ───────────── Demo timing, Follow mode, and real-world robustness ─────────────
+
+    @Test
+    fun demoTiming_fullCycleInAboutAMinute() {
+        val r = run(WalkerConfig.PARKINSONIAN, seconds = 75.0, timing = RampTiming.DEMO)
+        val ev = r.pipe.ramp.events
+        val rampAt = ev.firstOrNull { it.to == CueState.RAMPING }?.let { (it.tNanos - start) / 1e9 }
+        val backAt = ev.firstOrNull { it.to == CueState.STEPPING_BACK }?.let { (it.tNanos - start) / 1e9 }
+        println("demo timing: ramping at %s s, first step-back at %s s".format(rampAt, backAt))
+        assertTrue("ramping by 25 s: $rampAt", rampAt != null && rampAt <= 25.0)
+        assertTrue("stepped back by 70 s: $backAt", backAt != null && backAt <= 70.0)
+        assertTrue("never above cap", r.maxCueBpm <= r.pipe.ramp.maxBpm + 1e-6)
+    }
+
+    @Test
+    fun followMode_cueTracksSpeedChangesWithinSeconds() {
+        // A person deliberately changing pace drives it themselves: a weak pull toward the beat's tempo, and
+        // little step-by-step correction toward it (a strongly phase-correcting walker stays locked to the beat).
+        val cfg = WalkerConfig.PARKINSONIAN.copy(driftSpm = 0.5, entrainStrength = 0.3, phaseCorrection = 0.05)
+        val r = run(cfg, seconds = 90.0, followOnly = true) { t, w ->
+            w.targetCadenceSpm = when {
+                t < 30 -> 90.0
+                t < 60 -> 115.0
+                else -> 80.0
+            }
+        }
+        // Compare the cue with what the walker is actually doing (its true strikes), second by second.
+        val walkerAt = r.walkerTrace.toMap()
+        val pairs = r.cueTrace.mapNotNull { (t, cueBpm) -> walkerAt[t]?.let { Triple(t, cueBpm, it) } }
+        println("follow trace (t:cue/walker): " + pairs.filter { it.first.toInt() % 3 == 0 }
+            .joinToString(" ") { "%.0f:%.0f/%.0f".format(it.first, it.second, it.third) })
+        fun settleAfter(changeSec: Double): Double {
+            // Start the clock once the walker has actually moved ≥8 spm from its pre-change cadence. Then find
+            // the first time the cue is within ±4 bpm of the walker for 3 seconds running.
+            val before = pairs.last { it.first < changeSec }.third
+            val fromSec = pairs.first { it.first >= changeSec && kotlin.math.abs(it.third - before) >= 8.0 }.first
+            val window = pairs.filter { it.first >= fromSec }
+            val i = window.indices.first { k -> k + 2 < window.size && (0..2).all { kotlin.math.abs(window[k + it].second - window[k + it].third) <= 4.0 } }
+            return window[i].first - fromSec
+        }
+        val up = settleAfter(30.0)
+        val down = settleAfter(60.0)
+        val meanErr = pairs.filter { it.first >= 10 }.map { kotlin.math.abs(it.second - it.third) }.average()
+        println("follow: cue matched the walker ±4 bpm %.0f s after the speed-up and %.0f s after the slow-down; mean |cue − walker| %.1f bpm; sync %s"
+            .format(up, down, meanErr, r.pipe.syncStats))
+        assertEquals(CueState.LOCKING, r.pipe.ramp.state) // Follow never ramps
+        // ≤5 s: the fast switch waits for 2 consistent steps so one-off glitches on real data are ignored.
+        assertTrue("speed-up tracked in $up s", up <= 5.0)
+        assertTrue("slow-down tracked in $down s", down <= 5.0)
+        assertTrue("mean tracking error $meanErr bpm", meanErr <= 2.5)
+        assertTrue("session sync ${r.pipe.syncStats.sessionPct}", r.pipe.syncStats.sessionPct!! >= 0.75)
+    }
+
+    /** The front-pocket artifact: detections alternate late/early by 170 ms. The cue must hold a steady tempo
+     *  at the true cadence and keep sync. */
+    @Test
+    fun pocketArtifact_lockStaysSteadyAndInSync() {
+        val cfg = WalkerConfig.PARKINSONIAN.copy(farStepDelaySec = 0.17, seed = 9)
+        val r = run(cfg, seconds = 120.0, followOnly = true)
+        val settled = r.cueTrace.filter { it.first >= 30.0 }
+        val spread = settled.maxOf { it.second } - settled.minOf { it.second }
+        val walker = r.walker.currentCadenceSpm
+        val rawSpread = r.reports.filter { it.rawErrorMs != null && it.tNanos > start + 30 * sec }.map { it.rawErrorMs!! }
+            .let { it.max() - it.min() }
+        println("pocket artifact: cue %.1f–%.1f bpm (walker %.1f), raw per-step error spread %.0f ms, sync %s"
+            .format(settled.minOf { it.second }, settled.maxOf { it.second }, walker, rawSpread, r.pipe.syncStats))
+        assertTrue("cue tempo steady: spread $spread bpm", spread <= 6.0)
+        assertEquals(walker, r.pipe.cueBpm, 3.0)
+        assertTrue("rolling sync ${r.pipe.syncStats.rollingPct}", r.pipe.syncStats.rollingPct!! >= 0.8)
+    }
+
+    /** A wrong latency constant (the walker hears beats 40 ms later than assumed) is a constant bias. Beat
+     *  and walker must not chase each other into a tempo drift. */
+    @Test
+    fun latencyMismatch_doesNotDrift() {
+        for (follow in listOf(true, false)) {
+            val cfg = WalkerConfig.PARKINSONIAN.copy(driftSpm = 0.5)
+            val r = run(cfg, seconds = 150.0, followOnly = follow, timing = RampTiming.DEMO, heardOffsetNs = 40_000_000L)
+            val lockPhase = r.cueTrace.filter { (t, _) ->
+                t >= 20 && r.pipe.ramp.events.none { it.to == CueState.RAMPING && (it.tNanos - start) / 1e9 <= t }
+            }
+            println("latency mismatch (follow=$follow): offset learned %.1f ms; cue during lock %.1f–%.1f bpm; final %.1f; sync %s"
+                .format(r.pipe.offsetNs / 1e6, lockPhase.minOfOrNull { it.second }, lockPhase.maxOfOrNull { it.second }, r.pipe.cueBpm, r.pipe.syncStats))
+            if (follow) {
+                val late = r.cueTrace.filter { it.first >= 60 }
+                assertTrue("no drift: ${late.minOf { it.second }}–${late.maxOf { it.second }}", late.all { kotlin.math.abs(it.second - 90.0) <= 4.0 })
+            }
+            assertTrue("session sync ${r.pipe.syncStats.sessionPct}", r.pipe.syncStats.sessionPct!! >= 0.7)
+        }
+    }
+
+    /** Follow mode: after a stop the walker restarts at an arbitrary phase. The beat must jump back onto the
+     *  steps within a few steps, not creep back 10% per beat. */
+    @Test
+    fun followMode_resyncsQuicklyAfterAStop() {
+        val freeze = FreezeEpisode(startSec = 40.0, durationSec = 4.3)
+        val cfg = WalkerConfig.PARKINSONIAN.copy(freezes = listOf(freeze), entrainStrength = 0.3, phaseCorrection = 0.05, seed = 13)
+        val r = run(cfg, seconds = 80.0, followOnly = true)
+        val after = r.reports.filter { it.tNanos > start + ((freeze.startSec + freeze.durationSec) * sec).toLong() && it.errorMs != null }
+        val firstInSync = after.indexOfFirst { kotlin.math.abs(it.errorMs!!) <= Tuning.SYNC_WINDOW_MS }
+        val stayed = after.drop(firstInSync).take(10).count { kotlin.math.abs(it.errorMs!!) <= Tuning.SYNC_WINDOW_MS }
+        println("follow re-sync: back in sync %d steps after the restart; %d/10 in sync afterwards; errors %s"
+            .format(firstInSync, stayed, after.take(8).map { "%+.0f".format(it.errorMs) }))
+        assertTrue("re-synced within 4 steps: $firstInSync", firstInSync in 0..4)
+        assertTrue("stays in sync: $stayed/10", stayed >= 8)
     }
 }

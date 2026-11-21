@@ -22,7 +22,11 @@ import java.util.Locale
 
 enum class SourceKind(val label: String) { SIMULATED("Simulated"), LIVE("Live"), REPLAY("Replay") }
 
-enum class Placement(val label: String, val tag: String) { POCKET("Pocket", "pocket"), BELT("Belt clip", "belt") }
+enum class Placement(val label: String, val tag: String) {
+    POCKET("Pocket", "pocket"),
+    LOWER_BACK("Lower back", "lowerback"),
+    BELT("Belt clip", "belt"),
+}
 
 /** Everything needed to start a session. */
 data class SourceSpec(
@@ -33,6 +37,10 @@ data class SourceSpec(
     /** Live only: also write raw samples to CSV. */
     val record: Boolean = false,
     val placement: Placement = Placement.POCKET,
+    /** Follow mode: the beat always matches the walker; no ramp. */
+    val followMode: Boolean = false,
+    /** About a 1-minute ramp cycle (RampTiming.DEMO) instead of the clinical 45 s holds. */
+    val demoTiming: Boolean = true,
 )
 
 /**
@@ -73,14 +81,19 @@ object SessionHub {
 
     internal fun startSession(context: Context, spec: SourceSpec) {
         val source: SensorSource = when (spec.kind) {
-            SourceKind.SIMULATED -> SimulatedWalkerSource(
-                WalkerConfig.PARKINSONIAN.copy(cadenceSpm = spec.simCadence, entrains = spec.simEntrains),
-            ).also { simSource = it }
+            SourceKind.SIMULATED -> {
+                var cfg = WalkerConfig.PARKINSONIAN.copy(cadenceSpm = spec.simCadence, entrains = spec.simEntrains)
+                // In Follow mode the walker leads: it changes pace deliberately and is only weakly pulled by the
+                // beat. A strongly entraining walker would stay locked to the beat, and the slider would barely
+                // move anything.
+                if (spec.followMode) cfg = cfg.copy(entrainStrength = 0.3, phaseCorrection = 0.05)
+                SimulatedWalkerSource(cfg).also { simSource = it }
+            }
             SourceKind.LIVE -> LiveAccelSource(context)
             SourceKind.REPLAY -> ReplaySource(context, requireNotNull(spec.replay) { "no replay selected" })
         }
         val recordTo = if (spec.kind == SourceKind.LIVE && spec.record) newRecordingFile(context, spec.placement) else null
-        controller.start(source, recordTo)
+        controller.start(source, recordTo, followOnly = spec.followMode, demoTiming = spec.demoTiming)
     }
 
     internal fun stopSession() {

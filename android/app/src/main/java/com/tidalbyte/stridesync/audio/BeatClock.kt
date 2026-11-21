@@ -23,8 +23,10 @@ class BeatClock(
     /** The frame of the first beat. Leave some lead-in so the first click isn't at stream start. */
     private val firstBeatFrame: Double,
     sound: FloatArray,
-    private val maxPeriodChangePct: Double = Tuning.BEAT_MAX_PERIOD_CHANGE_PCT,
-    private val maxPhaseShiftPct: Double = Tuning.BEAT_MAX_PHASE_SHIFT_PCT,
+    /** Max period change per beat while audible, as a fraction. Follow mode raises it (see Tuning). */
+    var maxPeriodChangePct: Double = Tuning.BEAT_MAX_PERIOD_CHANGE_PCT,
+    /** Max phase shift per beat while audible, as a fraction. Follow mode raises it (see Tuning). */
+    var maxPhaseShiftPct: Double = Tuning.BEAT_MAX_PHASE_SHIFT_PCT,
 ) {
     private class Voice(val samples: FloatArray, val startFrame: Long, val gain: Float)
 
@@ -55,10 +57,13 @@ class BeatClock(
         targetPeriodFrames = frames
     }
 
+    private var pendingShiftUnclamped = false
+
     /** Requests that the next beat move by [frames] (positive = later). This replaces any request that
-     *  hasn't been applied yet. */
-    fun requestPhaseShift(frames: Double) {
+     *  hasn't been applied yet. [unclamped] skips the per-beat limit for this one shift (a deliberate re-sync). */
+    fun requestPhaseShift(frames: Double, unclamped: Boolean = false) {
         pendingShiftFrames = frames
+        pendingShiftUnclamped = unclamped
     }
 
     /**
@@ -97,13 +102,14 @@ class BeatClock(
         val maxDp = maxPeriodChangePct * periodFrames
         val period = periodFrames + (targetPeriodFrames - periodFrames).coerceIn(-maxDp, maxDp)
         val maxShift = maxPhaseShiftPct * period
-        val shift = pendingShiftFrames.coerceIn(-maxShift, maxShift)
+        val shift = if (pendingShiftUnclamped) pendingShiftFrames else pendingShiftFrames.coerceIn(-maxShift, maxShift)
         return Plan(lastBeatIdeal + period + shift, period)
     }
 
     private fun commit(plan: Plan, frame: Long) {
         periodFrames = plan.period
         pendingShiftFrames = 0.0
+        pendingShiftUnclamped = false
         // Keep the unrounded position so rounding never accumulates. Only if the beat was clamped forward,
         // continue from where it actually sounded.
         lastBeatIdeal = if (frame > plan.ideal.roundToLong()) frame.toDouble() else plan.ideal

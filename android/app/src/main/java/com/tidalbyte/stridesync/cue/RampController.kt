@@ -36,7 +36,20 @@ data class RampTiming(
     val holdSec: Double = Tuning.RAMP_HOLD_SEC,
     val stepBackSettleSec: Double = Tuning.STEP_BACK_SETTLE_SEC,
     val pauseSec: Double = Tuning.PAUSE_SEC,
-)
+    /** Steps in the rolling sync window that every sync judgment waits to fill. */
+    val syncWindowSteps: Int = Tuning.SYNC_ROLLING_STEPS,
+) {
+    companion object {
+        /** About a minute from Start to the first step-back, for demos. */
+        val DEMO = RampTiming(
+            calibrationSteps = Tuning.DEMO_CALIBRATION_STEPS,
+            lockMinSec = Tuning.DEMO_LOCK_MIN_SEC,
+            holdSec = Tuning.DEMO_RAMP_HOLD_SEC,
+            stepBackSettleSec = Tuning.DEMO_STEP_BACK_SETTLE_SEC,
+            syncWindowSteps = Tuning.DEMO_SYNC_ROLLING_STEPS,
+        )
+    }
+}
 
 /**
  * The cue-tempo state machine. Pure Kotlin and deterministic, driven by [onStep] and [onTick].
@@ -52,17 +65,28 @@ data class RampTiming(
  */
 class RampController(
     private val timing: RampTiming = RampTiming(),
+    /** Follow mode: calibrate briefly, then stay in LOCKING (the beat follows the walker) and never ramp. */
+    val followOnly: Boolean = false,
     private val log: (component: String, msg: String) -> Unit = { _, _ -> },
 ) {
+    /** Steps measured (silently) before the cue starts. */
+    val calibrationSteps: Int = if (followOnly) Tuning.FOLLOW_CALIBRATION_STEPS else timing.calibrationSteps
+
     var state: CueState = CueState.CALIBRATING
         private set
 
     var baselineSpm: Double? = null
         private set
 
-    /** The tempo ceiling, bpm. The absolute ceiling until a baseline exists. */
+    /** The tempo ceiling, bpm: baseline × (1 + MAX_RAMP_PCT), and the absolute ceiling until a baseline
+     *  exists. In Follow mode the beat only mirrors the walker's own cadence and never pushes, so only the
+     *  absolute ceiling applies. */
     val maxBpm: Double
-        get() = baselineSpm?.let { min(it * (1 + Tuning.MAX_RAMP_PCT), Tuning.ABS_MAX_CUE_BPM) } ?: Tuning.ABS_MAX_CUE_BPM
+        get() = if (followOnly) {
+            Tuning.ABS_MAX_CUE_BPM
+        } else {
+            baselineSpm?.let { min(it * (1 + Tuning.MAX_RAMP_PCT), Tuning.ABS_MAX_CUE_BPM) } ?: Tuning.ABS_MAX_CUE_BPM
+        }
 
     /** In LOCKING (or PAUSED from it): still aligning phase with the cue muted. */
     var acquiring: Boolean = false
@@ -91,9 +115,9 @@ class RampController(
     private val ladder = ArrayList<Double>()
     val rampLevel: Int get() = maxOf(0, ladder.size - 1)
 
-    private val calibIntervals = ArrayList<Long>()
+    private val calibStrides = ArrayList<Long>() // two-step intervals: immune to left/right alternation
+    private val calibChain = ArrayDeque<Long>()
     private var calibSteps = 0
-    private var lastCalibStepNs: Long? = null
     private var stateSinceNs = 0L
     private var holdStartNs = 0L
     private var audibleSinceNs = 0L
@@ -103,7 +127,11 @@ class RampController(
     val coupling: Coupling?
         get() = when (state) {
             CueState.CALIBRATING, CueState.PAUSED -> null
-            CueState.LOCKING -> if (acquiring) Coupling.ACQUIRE else Coupling.LOCK
+            CueState.LOCKING -> when {
+                acquiring -> Coupling.ACQUIRE
+                followOnly -> Coupling.FOLLOW
+                else -> Coupling.LOCK
+            }
             CueState.RAMPING, CueState.HOLDING, CueState.STEPPING_BACK -> Coupling.LEAD
         }
 
@@ -130,7 +158,7 @@ class RampController(
                         audibleSinceNs = tNs
                         event(tNs, CueState.LOCKING, "phase acquired, cue audible at %.1f bpm".format(cueBpm))
                     }
-                } else if (syncGood(sync) && secSince(audibleSinceNs, tNs) >= timing.lockMinSec) {
+                } else if (!followOnly && syncGood(sync) && secSince(audibleSinceNs, tNs) >= timing.lockMinSec) {
                     enterRamping(tNs, cueBpm, "in sync %s for %.0fs".format(pct(sync), secSince(audibleSinceNs, tNs)))
                 }
             }
@@ -179,21 +207,20 @@ class RampController(
     }
 
     private fun calibrate(tNs: Long) {
-        val prev = lastCalibStepNs
-        if (prev != null) {
-            val iv = tNs - prev
-            if (iv in Tuning.STEP_INTERVAL_MIN_MS * MS..Tuning.STEP_INTERVAL_MAX_MS * MS) calibIntervals += iv
-        }
-        lastCalibStepNs = tNs
+        val prev = calibChain.lastOrNull()
+        if (prev != null && tNs - prev > Tuning.STEP_INTERVAL_MAX_MS * MS) calibChain.clear() // a pause breaks the chain
+        calibChain.addLast(tNs)
+        if (calibChain.size > 3) calibChain.removeFirst()
+        if (calibChain.size == 3) calibStrides += calibChain.last() - calibChain.first()
         calibSteps++
-        if (calibSteps >= timing.calibrationSteps && calibIntervals.size >= Tuning.CADENCE_MIN_INTERVALS) {
-            val base = 60e9 / median(calibIntervals)
+        if (calibSteps >= calibrationSteps && calibStrides.size >= Tuning.CADENCE_MIN_STRIDES) {
+            val base = 120e9 / median(calibStrides)
             baselineSpm = base
             acquiring = true
             acquireStreak = 0
             transition(
                 tNs, CueState.LOCKING,
-                "baseline %.1f spm from %d steps; cap %.1f bpm".format(base, calibSteps, maxBpm),
+                "baseline %.1f spm from %d steps; cap %.1f bpm%s".format(base, calibSteps, maxBpm, if (followOnly) "; follow mode" else ""),
             )
             command(base)
         }

@@ -44,6 +44,10 @@ data class WalkerConfig(
     val sampleRateHz: Double = 100.0,
     /** Timestamp jitter, µs. Hardware timestamps aren't perfectly regular. */
     val timestampJitterUs: Double = 300.0,
+    /** Front-pocket artifact: every other foot's strike waveform shows up this much late, s. A phone on one
+     *  thigh feels the far foot's landing late or not at all. In real walks the detected intervals
+     *  alternated ~750/375 ms around a true ~560. The ground-truth strike times stay evenly spaced. */
+    val farStepDelaySec: Double = 0.0,
     val seed: Long = 1L,
 
     // ── Entrainment to the cue (used only when a beat source is attached and beats are audible) ──
@@ -125,13 +129,21 @@ class SimulatedWalker(private val config: WalkerConfig, private val startNanos: 
     @Volatile
     var targetCadenceSpm: Double = config.cadenceSpm
 
-    private var cadence = config.cadenceSpm
+    /** The walker's own intended cadence. It eases to [targetCadenceSpm] within a few steps (a deliberate
+     *  pace change is quick). */
+    private var natural = config.cadenceSpm
+
+    /** The slow pull toward the cue: approaches entrainStrength × (cue − natural) with entrainTauSec. */
+    private var entrained = 0.0
     private var drift = 0.0
     private var strikeCount = 0
     private var nowSec = 0.0
 
     /** The walker's current underlying cadence, spm (before drift and jitter). */
-    val currentCadenceSpm: Double get() = cadence
+    val currentCadenceSpm: Double get() = cadenceNow()
+
+    /** The cue can pull the walker up only to its ability ceiling. Its own pace is never clipped. */
+    private fun cadenceNow() = minOf(natural + entrained, maxOf(natural, targetCadenceSpm * (1 + config.abilityHeadroomPct)))
 
     // Strikes whose waveform may still affect the signal, plus the one upcoming strike (always last).
     private val strikes = ArrayDeque<Strike>()
@@ -166,7 +178,7 @@ class SimulatedWalker(private val config: WalkerConfig, private val startNanos: 
 
         var vertical = 0.0
         for (s in strikes) {
-            val dt = ts - s.t
+            val dt = ts - s.t - (if (s.index % 2 == 1) config.farStepDelaySec else 0.0)
             if (dt < -0.06 || dt > 0.6) continue
             vertical += s.amp * strikeShape(dt)
             vertical += s.amp * config.pushOffFrac * bump(dt - 0.2 * s.interval, 0.035)
@@ -175,10 +187,13 @@ class SimulatedWalker(private val config: WalkerConfig, private val startNanos: 
         // Step-rate sway, phase-locked to the strikes on either side of ts. Only while actually stepping.
         var lateral = 0.0
         var foreAft = 0.0
-        val prev = strikes.lastOrNull { it.t <= ts }
-        val nextT = strikes.firstOrNull { it.t > ts }?.t ?: nextStrikeT
-        if (walking && prev != null && nextT - prev.t < MAX_SWAY_SPAN_SEC) {
-            val phase = ((ts - prev.t) / (nextT - prev.t)).coerceIn(0.0, 1.0)
+        // Sway phase follows the *apparent* strike times. With the pocket artifact (farStepDelaySec), the far
+        // foot's whole bump shows up late, not just its impact.
+        fun apparent(s: Strike) = s.t + if (s.index % 2 == 1) config.farStepDelaySec else 0.0
+        val prev = strikes.lastOrNull { apparent(it) <= ts }
+        val nextT = strikes.firstOrNull { apparent(it) > ts }?.let { apparent(it) } ?: nextStrikeT
+        if (walking && prev != null && nextT - apparent(prev) < MAX_SWAY_SPAN_SEC) {
+            val phase = ((ts - apparent(prev)) / (nextT - apparent(prev))).coerceIn(0.0, 1.0)
             vertical += config.swayAmp * cos(2 * PI * phase)
             val stridePhase = (phase + (prev.index % 2)) / 2.0
             lateral = 0.35 * config.swayAmp * sin(2 * PI * stridePhase)
@@ -216,15 +231,15 @@ class SimulatedWalker(private val config: WalkerConfig, private val startNanos: 
 
     private fun nextInterval(strikeT: Double): Double {
         val cue = if (config.entrains) heardCue() else null
+        natural += (targetCadenceSpm - natural) * 0.25
         if (cue == null) {
-            cadence += (targetCadenceSpm - cadence) * 0.25
+            entrained = 0.0
         } else {
-            val ability = targetCadenceSpm * (1 + config.abilityHeadroomPct)
-            val pulled = targetCadenceSpm + config.entrainStrength * (60.0 / cue.periodSec - targetCadenceSpm)
-            val goal = minOf(pulled, ability)
-            val prelim = 60.0 / (cadence + drift)
-            cadence += (goal - cadence) * (1 - exp(-prelim / config.entrainTauSec))
+            val goal = config.entrainStrength * (60.0 / cue.periodSec - natural)
+            val prelim = 60.0 / (cadenceNow() + drift)
+            entrained += (goal - entrained) * (1 - exp(-prelim / config.entrainTauSec))
         }
+        val cadence = cadenceNow()
         val driftAmp = if (cue == null) config.driftSpm else config.driftSpm * config.cuedDriftScale
         drift = drift * 0.97 + gaussian() * driftAmp * 0.25
         val spm = (cadence + drift).coerceIn(20.0, 250.0)

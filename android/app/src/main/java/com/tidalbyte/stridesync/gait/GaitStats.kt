@@ -6,10 +6,12 @@ import kotlin.math.sqrt
  *  constant amount that `Tuning.OUTPUT_LATENCY_MS` absorbs. [amplitude] is the filtered peak height, m/s². */
 data class StepEvent(val tNanos: Long, val amplitude: Double)
 
-/** Cadence snapshot. [spm] and [cv] are null until enough valid intervals exist. */
+/** Cadence snapshot. [spm], [fastSpm] and [cv] are null until enough steps exist. */
 data class GaitStats(
     val spm: Double? = null,
-    /** Coefficient of variation of the recent inter-step intervals (0.05 = 5%). */
+    /** A more responsive (noisier) cadence estimate, for Follow mode. */
+    val fastSpm: Double? = null,
+    /** Stride-time coefficient of variation (0.05 = 5%). */
     val cv: Double? = null,
     val stepCount: Int = 0,
     val lastStepNanos: Long? = null,

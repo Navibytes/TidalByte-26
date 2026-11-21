@@ -10,9 +10,11 @@ object Tuning {
 
     // ───────────────────────── Sensor ─────────────────────────
 
-    /** Requested accelerometer sampling period, µs. 10 ms ≈ 100 Hz, which is under the Android 12+ 200 Hz cap,
-     *  so no HIGH_SAMPLING_RATE_SENSORS permission is needed. */
-    const val SENSOR_PERIOD_US = 10_000
+    /** Requested accelerometer sampling period, µs. 5 ms = 200 Hz, the most allowed without the
+     *  HIGH_SAMPLING_RATE_SENSORS permission on Android 12+. The S21's LSM6DSO reports minDelay 5000 µs.
+     *  This gives finer peak timing, but the timing error on real walks came from where the phone sits
+     *  (see the cadence section), not from the rate. */
+    const val SENSOR_PERIOD_US = 5_000
 
     /** SimulatedWalker emits its samples in batches this often, ms. This mimics the batched delivery of
      *  real sensors, so the pipeline never depends on arrival time. */
@@ -22,7 +24,7 @@ object Tuning {
 
     /** Rate of the detector's internal uniform resampling grid, Hz. Delivery of real samples is irregular,
      *  but the biquad coefficients assume a fixed rate. */
-    const val DETECTOR_FS_HZ = 100.0
+    const val DETECTOR_FS_HZ = 200.0
 
     /** Time constant of the moving mean that tracks gravity, s. It must be much longer than one slow
      *  Parkinson's step (up to ~1.5 s at 40 spm), or it starts eating the step signal. */
@@ -33,8 +35,10 @@ object Tuning {
     const val STEP_LOWPASS_HZ = 4.0
 
     /** A candidate peak must exceed this fraction of the recent peak envelope. Kept low because
-     *  Parkinson's strikes are weak and asymmetric (the far-side foot reads weaker in a pocket). */
-    const val STEP_THRESHOLD_FRAC = 0.4
+     *  Parkinson's strikes are weak and asymmetric. In real front-pocket walks the far foot's peak was ~40%
+     *  of the near foot's. At 0.4, a few weak ones dropped out, the envelope (a median) rose to the strong
+     *  peaks, and detection locked into one step per stride, reading half cadence. At 0.3 it recovers. */
+    const val STEP_THRESHOLD_FRAC = 0.3
 
     /** Absolute floor for the threshold, m/s² (filtered). Rejects sensor noise while the phone is still
      *  (resting S21 noise ≈ 0.01–0.02 m/s²). Shuffling strikes still filter to roughly 0.3 m/s². */
@@ -49,8 +53,8 @@ object Tuning {
 
     /** The decay stops at this fraction of the envelope. Without a floor, a long freeze lets the threshold
      *  sink until trembling-in-place (3–8 Hz, partly passed by the low-pass) counts as steps. Weak restart
-     *  steps still clear 0.4 × 0.25 = 10% of the old peak height. */
-    const val STEP_ENVELOPE_DECAY_FLOOR = 0.25
+     *  steps still clear 0.3 × 0.35 ≈ 10% of the old peak height. */
+    const val STEP_ENVELOPE_DECAY_FLOOR = 0.35
 
     /** Minimum refractory period between steps, ms. 250 ms caps detection at 240 spm, which still
      *  admits festination (rapid, tiny steps). */
@@ -71,16 +75,26 @@ object Tuning {
     const val SENSOR_GAP_RESET_MS = 500L
 
     // ───────────────────────── Cadence (gait/CadenceEstimator) ─────────────────────────
+    // Cadence and variability come from TWO-STEP intervals (t[k] − t[k−2], i.e. stride time), not from
+    // single-step intervals. With the phone on one thigh (a front pocket), real walks showed the two feet's
+    // detections alternating ~750/375 ms where true steps were ~560/560. A median of single intervals
+    // jumped between the two clusters. A long + short pair always sums to one stride, so two-step
+    // intervals cancel the alternation exactly. At the waist, where both feet read alike, it makes no
+    // difference.
 
-    /** spm = 60 / median of this many recent inter-step intervals. 8 smooths jitter without lagging much. */
-    const val CADENCE_WINDOW = 8
+    /** spm = 120 / median of this many recent two-step intervals. 6 tolerates one missed or extra step
+     *  (that corrupts only 2 of the 6). */
+    const val CADENCE_WINDOW_STRIDES = 6
 
-    /** Number of intervals used for the CV (consistency) metric. Longer than CADENCE_WINDOW because CV
-     *  from very few intervals is noisy. */
-    const val CV_WINDOW = 12
+    /** A faster estimate for Follow mode: median of this many two-step intervals (~1.5 s of walking). */
+    const val CADENCE_FAST_STRIDES = 3
 
-    /** No cadence is reported until this many valid intervals exist. */
-    const val CADENCE_MIN_INTERVALS = 3
+    /** Number of two-step intervals used for the stride-time CV (consistency), the standard clinical
+     *  variability measure. */
+    const val CV_WINDOW_STRIDES = 10
+
+    /** No cadence is reported until this many two-step intervals exist (4 steps). */
+    const val CADENCE_MIN_STRIDES = 2
 
     /** Plausible inter-step interval range, ms. 250 ms = 240 spm (festination). 2000 ms = 30 spm, a very
      *  slow Parkinson's gait. Don't use a healthy-gait range. */
@@ -136,39 +150,77 @@ object Tuning {
     const val CUE_GAIN = 0.8f
 
     // ───────────────────────── Phase lock (cue/PhaseLockedLoop) ─────────────────────────
-    // Per step: error = step time − nearest beat time (wrapped to ±period/2). The upcoming beat shifts by
-    // kP·error and the period changes by kI·error, each clamped per beat (BEAT_MAX_*_PCT). For a 1:1
-    // step/beat loop, kI = kP²/4 is critically damped: the error decays by a factor (1 − kP/2) per step.
+    // Per step: error = step time − nearest beat time (wrapped to ±period/2), averaged with the previous
+    // step's error to cancel left/right alternation. The upcoming beat shifts by kP × (error outside the
+    // dead band), clamped per beat (BEAT_MAX_PHASE_SHIFT_PCT).
+    //
+    // Tempo is NOT integrated from phase error. While the beat follows the walker (LOCKING, Follow mode),
+    // the tempo is set from the measured cadence (a frequency-locked loop). Why: a real walker also follows
+    // the beat. A constant measurement bias (a latency offset that's slightly wrong, or the pocket
+    // artifact) then makes the two chase each other, and an integrating PLL lets the tempo drift without
+    // bound. Cadence is bias-free, so the tempo stays anchored to what the walker actually does.
 
-    /** Strong coupling while locking: the beat follows the walker. 0.7 → error ×0.65 per step. A walker's
-     *  unaided step timing drifts like a random walk, so following closely beats smoothing. In closed-loop
-     *  tests, 0.5 lagged cadence drift, and 0.8 started ringing (steps are reported up to ~0.3 s late).
-     *  kI = kP²/4 (critical damping). */
-    const val PLL_LOCK_KP = 0.7
-    const val PLL_LOCK_KI = 0.1225
+    /** Phase coupling while the beat follows the walker. Errors inside the dead band are left for the walker
+     *  to correct; humans are good at that. */
+    const val PLL_LOCK_KP = 0.5
+    const val PLL_LOCK_KI = 0.0
 
-    /** Weak coupling while leading (ramping, or holding): a gentle phase nudge and no period change, so
-     *  the beat keeps its tempo and the walker has to come to it. Keep kP small: each nudge with a
-     *  persistent error effectively lengthens the beat a little, so the walker hears a slower cue than
-     *  commanded. In closed-loop tests, 0.15 sagged the heard tempo enough to push steps toward the edge
-     *  of the sync window. If the walker doesn't entrain, the steady-state error ≈ tempo mismatch / kP,
-     *  which shows up as lost sync. That's the signal to step back. */
+    /** Weak phase coupling while leading (ramping, holding): the beat keeps its tempo and the walker has to
+     *  come to it. Keep kP small: a persistent error outside the dead band makes each nudge lengthen the
+     *  beat, so the walker hears a slower cue than commanded. */
     const val PLL_LEAD_KP = 0.1
     const val PLL_LEAD_KI = 0.0
 
+    /** Phase errors within ±this get no correction, ms. This stops a small constant bias from making beat
+     *  and walker chase each other. It sits well inside the ±60 ms sync window. */
+    const val PLL_PHASE_DEADBAND_MS = 25
+
     /** Coupling while acquiring the initial lock with the cue muted. Nothing is audible, so the per-beat
-     *  clamps are lifted and the phase snaps in within a few steps. */
+     *  clamps and the dead band are lifted, and the phase snaps in within a few steps. */
     const val PLL_ACQUIRE_KP = 0.7
     const val PLL_ACQUIRE_KI = 0.0
 
     /** Consecutive in-window steps needed before a muted, acquiring cue becomes audible. */
     const val PLL_ACQUIRE_STEPS = 2
 
-    /** Lock mode only: if the cue tempo and the measured cadence disagree by more than this fraction, the
-     *  tempo jumps straight to the cadence (still slew-limited per beat) instead of waiting for the slow
-     *  integrator. A PLL can't pull in a large frequency error by itself. 6% is about 4× the noise of the
-     *  median-of-8 cadence estimate at a 3% interval CV. */
-    const val PLL_FREQ_RESET_PCT = 0.06
+    /** A beat-follows-walker tempo update is skipped if it changes the period by less than this fraction.
+     *  It avoids audible micro-jitter from cadence-estimate noise. */
+    const val FLL_MIN_UPDATE_PCT = 0.003
+
+    /** Per step, the beat-follows-walker tempo closes this fraction of the gap to the measured cadence.
+     *  Raw cadence estimates jitter ±1–2% step to step. Followed directly, that jitter drags an entraining
+     *  walker around, and the pair wanders. 0.5 halves the gap each step, so a real change is ~90% matched
+     *  in 3 steps. */
+    const val FLL_GAIN = 0.5
+
+    // ───────────────────────── Follow mode (demo: the beat always matches the walker) ─────────────────────────
+
+    /** Follow mode needs only enough steps for a first cadence estimate. */
+    const val FOLLOW_CALIBRATION_STEPS = 4
+
+    /** Follow mode tracks the steady cadence estimate, but switches to the fast one (and follows it
+     *  directly) when the two disagree by more than this fraction in the same direction for
+     *  FOLLOW_FAST_SWITCH_STEPS consecutive steps, i.e. a real speed change. A single odd interval (a missed
+     *  or extra detection, common on real walks) doesn't trigger it; in real-data replays that kind of
+     *  one-step jump knocked the phase out. */
+    const val FOLLOW_FAST_SWITCH_PCT = 0.04
+    const val FOLLOW_FAST_SWITCH_STEPS = 2
+
+    /** Follow mode re-sync: if the (pair-averaged) error exceeds this fraction of the period, in the same
+     *  direction, for FOLLOW_RESYNC_STEPS consecutive steps, the next beat jumps straight onto the steps
+     *  instead of creeping back 10% per beat. On real walks, turns and pace changes left the beat ±200 ms
+     *  off for 4–5 steps. */
+    const val FOLLOW_RESYNC_FRAC = 0.25
+    const val FOLLOW_RESYNC_STEPS = 2
+
+    /** In Follow mode, a single beat may shift up to this fraction of the period for phase correction (ramp
+     *  mode keeps BEAT_MAX_PHASE_SHIFT_PCT). Recovers a 250 ms misalignment in ~5 steps instead of ~10. */
+    const val FOLLOW_MAX_PHASE_SHIFT_PCT = 0.10
+
+    /** In Follow mode, the beat's tempo may change up to this fraction per beat (ramp mode keeps the spec's
+     *  BEAT_MAX_PERIOD_CHANGE_PCT). 10% matches a 100→120 spm change in ~2 beats. Fine for a demo of
+     *  tracking; too abrupt for therapy. */
+    const val FOLLOW_MAX_PERIOD_CHANGE_PCT = 0.10
 
     // ───────────────────────── Sync metrics (cue/SyncTracker) ─────────────────────────
 
@@ -188,7 +240,23 @@ object Tuning {
      *  SYNC_REQUIRED_PCT, sync is "marginal": hold, don't advance. */
     const val SYNC_LOST_PCT = 0.5
 
-    /** The rolling sync metrics cover this many recent steps. */
+    /** A persistent step-vs-beat offset is learned (EMA over this many steps, while audible and the beat is
+     *  following, i.e. LOCKING / Follow; frozen while it leads) and removed
+     *  before phase correction and sync judgment. Why: the exact latency (DETECTOR_LAG_MS + speaker) and
+     *  placement effects (the pocket artifact biases errors by up to ~85 ms) are unknown constants. Chasing a
+     *  constant bias makes walker and beat drift together, and it would mark a walker who steps
+     *  consistently on the beat as "out of sync". Deviations from the learned offset still get corrected
+     *  and judged. */
+    const val SYNC_OFFSET_TAU_STEPS = 8.0
+
+    /** The learned offset is clamped to ±this, ms. Beyond it, misalignment is real and gets judged. */
+    const val SYNC_OFFSET_MAX_MS = 100
+
+    /** The offset learns only from steps within ±this of the current estimate, ms. Disruptions (turns,
+     *  stops, a burst of missed steps) mustn't drag it. On real walks they pulled it 150 ms in a few steps. */
+    const val SYNC_OFFSET_GATE_MS = 120
+
+    /** The rolling sync metrics cover this many recent steps. Sync judgments wait for a full window. */
     const val SYNC_ROLLING_STEPS = 16
 
     // ───────────────────────── Ramp (cue/RampController) ─────────────────────────
@@ -227,4 +295,13 @@ object Tuning {
 
     /** If measured cadence falls this fraction below the cue tempo while ramping/holding, step back at once. */
     const val CADENCE_DROP_PCT = 0.15
+
+    // ───────────────────────── Demo timing (RampTiming.DEMO) ─────────────────────────
+    // The whole calibrate → lock → ramp → overreach → step-back cycle fits in about a minute. The clinical
+    // values above stay the defaults. Caps are unchanged.
+    const val DEMO_CALIBRATION_STEPS = 8
+    const val DEMO_LOCK_MIN_SEC = 8.0
+    const val DEMO_RAMP_HOLD_SEC = 10.0
+    const val DEMO_STEP_BACK_SETTLE_SEC = 6.0
+    const val DEMO_SYNC_ROLLING_STEPS = 8
 }

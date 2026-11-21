@@ -87,7 +87,11 @@ class MetronomeEngine : CueOutput {
         synchronized(lock) {
             // First beat 50 ms after the initial write-ahead fills, so it isn't at the very start of the stream.
             clock = BeatClock(periodFor(bpm), firstBeatFrame = writeAheadFrames + 0.05 * sr, sound = sounds.getValue(sound))
-                .also { it.gain = if (muted) 0f else Tuning.CUE_GAIN }
+                .also {
+                    it.gain = if (muted) 0f else Tuning.CUE_GAIN
+                    it.maxPeriodChangePct = maxPeriodChangePct
+                    it.maxPhaseShiftPct = maxPhaseShiftPct
+                }
             clockOffsetNs = SystemClock.elapsedRealtimeNanos() - System.nanoTime()
             hasHwTimestamp = false
             recent.clear()
@@ -113,8 +117,8 @@ class MetronomeEngine : CueOutput {
 
     /** Moves the next unplayed beat by [ns] (positive = later), clamped per beat. Replaces any pending
      *  request. Used by the PLL. */
-    override fun requestPhaseShiftNs(ns: Long) {
-        synchronized(lock) { clock?.requestPhaseShift(ns * sr / 1e9) }
+    override fun requestPhaseShiftNs(ns: Long, unclamped: Boolean) {
+        synchronized(lock) { clock?.requestPhaseShift(ns * sr / 1e9, unclamped) }
     }
 
     override val periodNs: Double
@@ -136,6 +140,18 @@ class MetronomeEngine : CueOutput {
     fun setSound(s: CueSound) {
         sound = s
         synchronized(lock) { clock?.sound = sounds.getValue(s) }
+    }
+
+    @Volatile private var maxPeriodChangePct = Tuning.BEAT_MAX_PERIOD_CHANGE_PCT
+    @Volatile private var maxPhaseShiftPct = Tuning.BEAT_MAX_PHASE_SHIFT_PCT
+
+    override fun setMaxPerBeatChange(periodPct: Double, phasePct: Double) {
+        maxPeriodChangePct = periodPct
+        maxPhaseShiftPct = phasePct
+        synchronized(lock) {
+            clock?.maxPeriodChangePct = periodPct
+            clock?.maxPhaseShiftPct = phasePct
+        }
     }
 
     override fun setMuted(m: Boolean) {

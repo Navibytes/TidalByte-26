@@ -114,6 +114,7 @@ fun HomeScreen(vm: MainViewModel) {
             }
 
             SourceCard(vm, state)
+            ModeCard(vm, state)
             StatusCard(state)
             if (state.recentEvents.isNotEmpty()) EventsCard(state)
 
@@ -202,6 +203,37 @@ private fun SourceCard(vm: MainViewModel, state: LiveState) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModeCard(vm: MainViewModel, state: LiveState) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Mode", style = MaterialTheme.typography.titleSmall)
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                listOf(false to "Ramp", true to "Follow").forEachIndexed { i, (follow, label) ->
+                    SegmentedButton(
+                        selected = vm.followMode == follow,
+                        onClick = { vm.updateFollowMode(follow) },
+                        enabled = !state.running,
+                        shape = SegmentedButtonDefaults.itemShape(i, 2),
+                    ) { Text(label) }
+                }
+            }
+            Text(
+                if (vm.followMode) {
+                    "The beat matches your steps as closely as possible. No tempo ramp."
+                } else {
+                    "Calibrate, lock to your steps, then raise the tempo 2% at a time while you stay in sync."
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (!vm.followMode) {
+                LabeledSwitch("Demo timing (~1 min cycle)", vm.demoTiming, enabled = !state.running, onChange = vm::updateDemoTiming)
+            }
+        }
+    }
+}
+
 @Composable
 private fun LabeledSwitch(label: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -220,7 +252,7 @@ private fun StatusCard(state: LiveState) {
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
-                if (state.running) state.cueState.label.uppercase() else "STOPPED",
+                if (state.running) stateLabel(state).uppercase() else "STOPPED",
                 fontSize = 30.sp,
                 fontWeight = FontWeight.Bold,
                 color = if (state.running) stateColor(state.cueState) else MaterialTheme.colorScheme.outline,
@@ -251,7 +283,7 @@ private fun StatusCard(state: LiveState) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                 Stat("In sync", state.syncPct?.let { "%.0f %%".format(it * 100) } ?: "—")
                 Stat("Mean async", state.meanAbsAsyncMs?.let { "%.0f ms".format(it) } ?: "—")
-                Stat("CV", state.cv?.let { "%.1f %%".format(it * 100) } ?: "—")
+                Stat("Stride CV", state.cv?.let { "%.1f %%".format(it * 100) } ?: "—")
             }
             Spacer(Modifier.height(10.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -282,10 +314,14 @@ private fun EventRow(e: CueEvent, startNs: Long) {
     )
 }
 
+private fun stateLabel(s: LiveState): String =
+    if (s.followMode && s.cueState == CueState.LOCKING) "Following" else s.cueState.label
+
 private fun stateDetail(s: LiveState): String = when {
     !s.running -> "Press Start, then walk"
-    s.cueState == CueState.CALIBRATING -> "Measuring baseline: ${s.calibrationLeft} steps to go"
+    s.cueState == CueState.CALIBRATING -> "Measuring your cadence: ${s.calibrationLeft} steps to go"
     s.cueState == CueState.LOCKING && s.cueBpm == null -> "Finding the beat…"
+    s.followMode && s.cueState == CueState.LOCKING -> "Beat matches your cadence"
     s.cueState == CueState.LOCKING -> "Beat follows your steps"
     s.cueState == CueState.RAMPING -> "Ramp step ${s.rampLevel}: holding, then up if in sync"
     s.cueState == CueState.HOLDING -> "Tempo steady"

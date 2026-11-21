@@ -238,12 +238,44 @@ class RampControllerTest {
         assertEquals(CueState.CALIBRATING, d.ramp.state)
     }
 
-    /** A randomized session: whatever happens, the tempo only rises in RAMPING, by ≤2%, and never above the cap. */
+    @Test
+    fun followMode_calibratesQuickly_neverRamps_stillPauses() {
+        val d = Driver(RampController(followOnly = true))
+        d.steps(Tuning.FOLLOW_CALIBRATION_STEPS)
+        assertEquals(CueState.LOCKING, d.ramp.state)
+        d.steps(Tuning.PLL_ACQUIRE_STEPS)
+        assertFalse(d.ramp.muted)
+        d.walk(10 * 60.0) // ten minutes of perfect sync
+        assertEquals("follow mode never ramps", CueState.LOCKING, d.ramp.state)
+        assertEquals(0, d.ramp.rampStepsTaken)
+        assertEquals(Coupling.FOLLOW, d.ramp.coupling)
+        d.silence(Tuning.PAUSE_SEC + 0.2)
+        assertEquals(CueState.PAUSED, d.ramp.state)
+        d.steps(1)
+        assertEquals(CueState.LOCKING, d.ramp.state)
+    }
+
+    @Test
+    fun demoTiming_reachesRampingFast_andStepsEvery10s() {
+        val d = Driver(RampController(RampTiming.DEMO))
+        d.steps(Tuning.DEMO_CALIBRATION_STEPS)
+        assertEquals(CueState.LOCKING, d.ramp.state)
+        d.steps(Tuning.PLL_ACQUIRE_STEPS)
+        d.walk(Tuning.DEMO_LOCK_MIN_SEC + 1)
+        assertEquals(CueState.RAMPING, d.ramp.state)
+        val rampAt = d.ramp.events.first { it.to == CueState.RAMPING }.tNanos
+        assertTrue("ramping ${(rampAt - 10 * sec) / 1e9}s after the first step", (rampAt - 10 * sec) / 1e9 < 15.0)
+        d.walk(Tuning.DEMO_RAMP_HOLD_SEC + 1)
+        assertEquals(2, d.ramp.rampStepsTaken)
+    }
+
+    /** A randomized session: whatever happens, the tempo only rises in RAMPING, by ≤2%, and never above the
+     *  cap, under both the clinical and the demo timings. */
     @Test
     fun fuzz_capsHoldUnderArbitrarySequences() {
-        for (seed in 1L..20L) {
+        for (seed in 1L..20L) for (timing in listOf(RampTiming(), RampTiming.DEMO)) {
             val rng = Random(seed)
-            val d = Driver()
+            val d = Driver(RampController(timing))
             d.steps(Tuning.CALIBRATION_STEPS, intervalMs = 550 + rng.nextLong(100))
             val cap = d.ramp.maxBpm
             var prev = d.cueBpm

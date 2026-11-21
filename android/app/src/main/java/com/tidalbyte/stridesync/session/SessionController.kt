@@ -7,6 +7,7 @@ import com.tidalbyte.stridesync.audio.CueSound
 import com.tidalbyte.stridesync.audio.MetronomeEngine
 import com.tidalbyte.stridesync.cue.CueEvent
 import com.tidalbyte.stridesync.cue.CueState
+import com.tidalbyte.stridesync.cue.RampTiming
 import com.tidalbyte.stridesync.sensor.SensorSource
 import com.tidalbyte.stridesync.sensor.SimulatedWalkerSource
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +32,9 @@ data class LiveState(
     /** Seconds since the last detected step (null before the first one). */
     val sinceLastStepSec: Double? = null,
     val cueState: CueState = CueState.CALIBRATING,
+    /** Follow mode: the beat always matches the walker; no ramp. */
+    val followMode: Boolean = false,
+    val demoTiming: Boolean = false,
     /** Steps still needed to finish calibrating. */
     val calibrationLeft: Int = Tuning.CALIBRATION_STEPS,
     val baselineSpm: Double? = null,
@@ -75,11 +79,23 @@ class SessionController(private val scope: CoroutineScope) {
         engine?.setSound(sound)
     }
 
-    /** Starts a session on [source]. If [recordTo] is set, raw samples are also written there as CSV. */
-    fun start(source: SensorSource, recordTo: File? = null) {
+    /**
+     * Starts a session on [source]. If [recordTo] is set, raw samples are also written there as CSV.
+     * [followOnly] selects Follow mode (the beat always matches the walker). [demoTiming] uses
+     * [RampTiming.DEMO] (a ~1 minute cycle) instead of the clinical timings.
+     */
+    fun start(source: SensorSource, recordTo: File? = null, followOnly: Boolean = false, demoTiming: Boolean = false) {
         if (job?.isActive == true) return
-        _state.value = LiveState(running = true, sourceLabel = source.label, recordingName = recordTo?.name)
-        SLog.i(TAG, "session start, source=${source.label}${recordTo?.let { ", recording to ${it.name}" } ?: ""}")
+        val timing = if (demoTiming) RampTiming.DEMO else RampTiming()
+        _state.value = LiveState(
+            running = true, sourceLabel = source.label, recordingName = recordTo?.name,
+            followMode = followOnly, demoTiming = demoTiming,
+        )
+        SLog.i(
+            TAG,
+            "session start, source=${source.label}, mode=${if (followOnly) "follow" else "ramp"}, " +
+                "timing=${if (demoTiming) "demo" else "clinical"}${recordTo?.let { ", recording to ${it.name}" } ?: ""}",
+        )
         val recorder = recordTo?.let { SampleRecorder(it, scope) }
         val id = ++sessionId
 
@@ -89,7 +105,7 @@ class SessionController(private val scope: CoroutineScope) {
             onBeat = ::onBeatPlaced
         }
         engine = eng
-        val pipe = GaitCuePipeline(eng, log = SLog::d)
+        val pipe = GaitCuePipeline(eng, timing, followOnly, log = SLog::d)
         if (source is SimulatedWalkerSource) source.beatSource = eng::audibleBeatsHeardNs
         eng.start(Tuning.CUE_DEFAULT_BPM)
 
@@ -134,7 +150,7 @@ class SessionController(private val scope: CoroutineScope) {
                                 stepCount = g.stepCount,
                                 sinceLastStepSec = g.lastStepNanos?.let { t -> (s.tNanos - t) / 1e9 },
                                 cueState = ramp.state,
-                                calibrationLeft = maxOf(0, Tuning.CALIBRATION_STEPS - g.stepCount),
+                                calibrationLeft = maxOf(0, ramp.calibrationSteps - g.stepCount),
                                 baselineSpm = ramp.baselineSpm,
                                 maxBpm = ramp.baselineSpm?.let { ramp.maxBpm },
                                 rampLevel = ramp.rampLevel,

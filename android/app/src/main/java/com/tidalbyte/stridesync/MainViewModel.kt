@@ -39,6 +39,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var cueSound by mutableStateOf(CueSound.CLICK)
         private set
+    var followMode by mutableStateOf(false)
+        private set
+    var demoTiming by mutableStateOf(true)
+        private set
 
     val canStart: Boolean get() = sourceKind != SourceKind.REPLAY || selectedReplay != null
 
@@ -63,6 +67,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 replay = selectedReplay,
                 record = record,
                 placement = placement,
+                followMode = followMode,
+                demoTiming = demoTiming,
             ),
         )
     }
@@ -94,6 +100,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun selectReplay(r: ReplayRef) {
         selectedReplay = r
+    }
+
+    /** Takes effect at the next Start. */
+    fun updateFollowMode(on: Boolean) {
+        followMode = on
+    }
+
+    /** Takes effect at the next Start. */
+    fun updateDemoTiming(on: Boolean) {
+        demoTiming = on
     }
 
     fun updateCueSound(sound: CueSound) {

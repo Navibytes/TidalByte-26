@@ -47,40 +47,50 @@ class PhaseLockedLoopTest {
         val beats = listOf(0L, 600 * ms)
         val step = 600 * ms + 250 * ms // +250 ms error
         val locked = pll.onStep(step, beats, p, Coupling.LOCK)!!
-        assertEquals((Tuning.BEAT_MAX_PHASE_SHIFT_PCT * p).toLong(), locked.shiftNs)
-        assertTrue(locked.periodNs - p <= Tuning.BEAT_MAX_PERIOD_CHANGE_PCT * p + 1)
+        assertEquals((Tuning.BEAT_MAX_PHASE_SHIFT_PCT * p).toLong(), locked.shiftNs) // 0.5 × 225 ms, clamped to 30
+        assertEquals("tempo isn't integrated from phase (cadence sets it)", p, locked.periodNs, 0.0)
         val acq = pll.onStep(step, beats, p, Coupling.ACQUIRE)!!
-        assertEquals((Tuning.PLL_ACQUIRE_KP * 250 * ms).toLong(), acq.shiftNs)
-        val lead = pll.onStep(600 * ms + 10 * ms, beats, p, Coupling.LEAD)!!
+        assertEquals((Tuning.PLL_ACQUIRE_KP * 250 * ms).toLong(), acq.shiftNs) // no dead band, no clamp
+        val lead = pll.onStep(600 * ms + 40 * ms, beats, p, Coupling.LEAD)!!
         assertEquals(p, lead.periodNs, 0.0) // leading never changes tempo
+    }
+
+    @Test
+    fun deadband_smallErrorsUntouched_largerOnesCorrectedBeyondIt() {
+        val pll = PhaseLockedLoop()
+        val p = 600.0 * ms
+        val band = Tuning.PLL_PHASE_DEADBAND_MS * ms
+        assertEquals(0L, pll.correct(band, 0, p, Coupling.LOCK).shiftNs)
+        assertEquals(0L, pll.correct(-band + 1, 0, p, Coupling.LOCK).shiftNs)
+        assertEquals((Tuning.PLL_LOCK_KP * 10 * ms).toLong(), pll.correct(band + 10 * ms, 0, p, Coupling.LOCK).shiftNs)
+        assertEquals(-(Tuning.PLL_LOCK_KP * 10 * ms).toLong(), pll.correct(-band - 10 * ms, 0, p, Coupling.LOCK).shiftNs)
     }
 
     /**
      * Ideal step times (no detector), with the real reporting delay: a step becomes known ~300 ms after it
-     * happens. LOCK coupling must pull in a 150 ms phase offset and a 2.5% tempo mismatch.
+     * happens. With matching tempo, LOCK coupling pulls a 150 ms phase offset into the dead band and
+     * leaves it there.
      */
     @Test
-    fun lockCoupling_convergesInPhaseAndFrequency_withReportingDelay() {
+    fun lockCoupling_pullsPhaseIntoDeadband_withReportingDelay() {
         val start = 10_000 * ms
-        val walkerPeriod = 650 * ms
-        val cue = VirtualMetronome(start, initialBpm = 60e9 / (667.0 * ms), latencyNs = 0)
+        val period = 650 * ms
+        val cue = VirtualMetronome(start, initialBpm = 60e9 / period, latencyNs = 0)
         val pll = PhaseLockedLoop()
-        val firstBeat = start + 150 * ms
         val errors = ArrayList<Long>()
-        for (k in 0 until 60) {
-            val step = firstBeat + 150 * ms + k * walkerPeriod
-            cue.advanceTo(step + 300 * ms) // the step is reported 300 ms late
+        for (k in 0 until 40) {
+            val step = start + 150 * ms + 150 * ms + k * period
+            cue.advanceTo(step + 300 * ms)
             val c = pll.onStep(step, cue.recentBeatTimes(), cue.periodNs, Coupling.LOCK) ?: continue
             errors += c.errorNs
             cue.requestPhaseShiftNs(c.shiftNs)
-            cue.setPeriodNs(c.periodNs)
         }
         println("lock errors (ms): " + errors.map { it / ms })
-        assertTrue("phase settled: ${errors.takeLast(10).map { it / ms }}", errors.takeLast(20).all { abs(it) < 3 * ms })
-        assertEquals(walkerPeriod.toDouble(), cue.periodNs, 1.0 * ms)
+        val band = Tuning.PLL_PHASE_DEADBAND_MS * ms
+        assertTrue("settled: ${errors.takeLast(10).map { it / ms }}", errors.takeLast(20).all { kotlin.math.abs(it) <= band + 1 * ms })
     }
 
-    /** LEAD coupling with matched tempo aligns phase but never changes the tempo. */
+    /** LEAD coupling with matched tempo aligns phase into the dead band but never changes the tempo. */
     @Test
     fun leadCoupling_alignsPhaseWithoutChangingTempo() {
         val start = 10_000 * ms
@@ -97,7 +107,8 @@ class PhaseLockedLoopTest {
             cue.setPeriodNs(c.periodNs)
         }
         assertEquals(period.toDouble(), cue.periodNs, 0.01)
-        assertTrue("lead errors ${errors.takeLast(5).map { it / ms }}", errors.takeLast(10).all { abs(it) < 5 * ms })
+        val band = Tuning.PLL_PHASE_DEADBAND_MS * ms
+        assertTrue("lead errors ${errors.takeLast(5).map { it / ms }}", errors.takeLast(10).all { kotlin.math.abs(it) <= band + 1 * ms })
     }
 
     @Test

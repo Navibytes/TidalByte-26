@@ -51,10 +51,15 @@ class VirtualMetronome(
 
     override fun setPeriodNs(periodNs: Double) = clock.setTargetPeriod(periodNs * sr / 1e9)
 
-    override fun requestPhaseShiftNs(ns: Long) = clock.requestPhaseShift(ns * sr / 1e9)
+    override fun requestPhaseShiftNs(ns: Long, unclamped: Boolean) = clock.requestPhaseShift(ns * sr / 1e9, unclamped)
 
     override var muted: Boolean = muted
         private set
+
+    override fun setMaxPerBeatChange(periodPct: Double, phasePct: Double) {
+        clock.maxPeriodChangePct = periodPct
+        clock.maxPhaseShiftPct = phasePct
+    }
 
     override fun setMuted(muted: Boolean) {
         this.muted = muted

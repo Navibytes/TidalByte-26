@@ -105,6 +105,22 @@ class BeatClockTest {
     }
 
     @Test
+    fun unclampedShift_appliedInFullOnce_thenClampsResume() {
+        val p = period(100.0)
+        val clock = BeatClock(p, 0.0, sound)
+        val beats = ArrayList<Long>()
+        renderAll(clock, 1, 1, beats = beats)
+        clock.requestPhaseShift(0.3 * p, unclamped = true) // a deliberate re-sync
+        renderAll(clock, (2.5 * p).toInt(), 240, startFrame = 1, beats = beats) // places the beats at 1.3p and 2.3p
+        clock.requestPhaseShift(0.3 * p) // an ordinary request is clamped again
+        renderAll(clock, (2 * p).toInt(), 240, startFrame = (2.5 * p).toLong() + 1, beats = beats)
+        val iv = beats.zipWithNext { a, b -> b - a }
+        assertEquals((1.3 * p).roundToLong(), iv[0])
+        assertEquals(p.roundToLong(), iv[1])
+        assertEquals((p * (1 + Tuning.BEAT_MAX_PHASE_SHIFT_PCT)).roundToLong(), iv[2])
+    }
+
+    @Test
     fun negativeShift_neverPlacesBeatInAlreadyWrittenAudio() {
         val p = period(100.0)
         val clock = BeatClock(p, 0.0, sound)
