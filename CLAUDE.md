@@ -19,6 +19,8 @@ runs locally on **mock data**; the app doesn't upload (milestone 6 was skipped).
 - Milestone 8 is partly done: the big Start/Stop and the state label exist, but **latency calibration is still open**.
 - Added at the user's request after live walk tests: **Follow mode**, **Demo timing** (about a 1-minute cycle), and a
   tracking rework driven by real recordings (see the Pipeline section and the Gotchas).
+- **Music cue:** a user-provided song as the cue, its tempo locked to the beat clock (see Audio). Follow + Music
+  was retested live after the smooth music profile went in; the user reported it "worked great".
 
 ## Stack
 - **Android:** Kotlin, Jetpack Compose, coroutines/Flow, `SensorManager`, `AudioTrack`.
@@ -30,8 +32,10 @@ runs locally on **mock data**; the app doesn't upload (milestone 6 was skipped).
 - **No:** ExoPlayer/Media3, Rubber Band, SoundTouch, time-stretching, streaming services, Hilt/Dagger (wire things
   by hand), or Room.
 
-The audio is a **synthesized metronome/beat**, not music. That means tempo and phase are fully controllable,
-there are no stretch artifacts, and beats can be placed sample-accurately.
+The cue is a **synthesized click or woodblock**, or **Music**: a user-provided song played varispeed (sped up or
+slowed down) between its own beats, so each song beat lands on the beat clock's frame. Either way the beat clock
+fully controls tempo and phase, and beats are sample-accurate. Pitch follows tempo for Music; there's no time-stretch
+library.
 
 ## Repo layout (as built)
 ```
@@ -41,6 +45,7 @@ android/app/src/main/java/com/tidalbyte/stridesync/
   gait/     StepDetector, CadenceEstimator, GaitStats, Biquad                     ← pure Kotlin
   cue/      PhaseLockedLoop (+Coupling), RampController (+CueState, RampTiming), SyncTracker, CueOutput  ← pure Kotlin
   audio/    MetronomeEngine (AudioTrack; implements CueOutput), BeatClock (pure Kotlin scheduler/mixer), ClickSynth
+            (+CueSound), SongTrack + SongRenderer (pure Kotlin: beat-locked varispeed song), SongLoader (assets)
   session/  GaitCuePipeline (pure Kotlin: detector → cadence → PLL → ramp → cue), SessionController (Android
             wiring, LiveState), SessionHub (the process-wide controller + SourceSpec), SampleRecorder (CSV)
   service/  CueService (foreground service, type mediaPlayback)
@@ -51,6 +56,9 @@ android/app/src/test/      JVM tests: gait/, cue/, audio/, sensor/, session/ (cl
 android/app/src/main/assets/replays/   real recorded walks (front pocket, lower back): Replay demos + test fixtures
 portal/                    Vite app: src/{main,charts,data,dom}.ts, src/views/*, src/data/mock-data.json
 tools/seed_portal.mjs      generates portal/src/data/mock-data.json
+tools/prepare_song.py      converts a song + maps its beats → android/app/src/main/assets/music/song.{wav,json}
+music/                     GITIGNORED: the user's song files (input). The current song: Stayin' Alive (Instrumental)
+android/app/src/main/assets/music/   GITIGNORED: the prepared song. A fresh clone has none; the Music chip is disabled
 ```
 Not built: `data/FirestoreRepo`, `SessionRecorder`/`SessionSummary`, `firebase/`, and separate
 LiveSession/Summary/Debug screens. The Record toggle lives on Home.
@@ -67,6 +75,9 @@ adb pull /sdcard/Android/data/com.tidalbyte.stridesync/files/recordings/ ./recor
 npm install && npm run dev      # http://localhost:5173
 npm run build && npm run preview
 npm run seed                    # = node ../tools/seed_portal.mjs. Rerun on demo day so "today" is current.
+
+# Music cue (from repo root; needs ffmpeg + numpy). Then rebuild/install the app.
+python3 tools/prepare_song.py "music/<file>" --title "Name" --preview   # also --start/--end, --shift-half
 ```
 
 ## Pipeline (data flow)
@@ -116,7 +127,8 @@ which drive a virtual BeatClock. `SessionController` hosts it on a coroutine. `S
 
 ### 3. Cadence — `gait/CadenceEstimator`
 - **Two-step intervals** (t[k] − t[k−2], one stride). A long + short pair cancels left/right alternation exactly.
-- spm = 120 / median(last 6). `fastSpm` = the median of the last 3.
+- spm = 120 / median(last 6). `fastSpm` = the median of the last 5. With 3, one glitch step (it corrupts 2
+  overlapping intervals) caused spikes on real walks.
 - CV = **stride-time CV** over the last 10 (the clinical variability measure).
 
 ### 4. Phase lock and tempo following — `cue/PhaseLockedLoop`, `session/GaitCuePipeline`
@@ -135,8 +147,16 @@ which drive a virtual BeatClock. `SessionController` hosts it on a coroutine. `S
   - LOCK: kP 0.5.
   - FOLLOW: kP 0.5, 10% clamp, and a one-off **re-sync jump** when the error stays over 25% of a period for 2 steps.
   - LEAD: kP 0.1.
+  - **With Music (any mode):** MUSIC_FOLLOW / MUSIC_LEAD.
 - **Why not an integrating PI loop:** the walker follows the beat while the beat follows the walker, so any constant
   bias (a wrong latency, the placement artifact) makes them chase each other and the tempo drifts without bound.
+- **The smooth profile, whenever Music plays** (`GaitCuePipeline.music`):
+  - Per-beat caps: tempo 3%, phase 2.5%.
+  - Phase kP 0.15. No re-sync jumps.
+  - Tempo gain 0.3 per step. Follow's fast switch needs a >6% disagreement for 3 steps.
+  - Why: with a song, every per-beat timing change is an audible tempo/pitch wobble. Click-tuned settings made the
+    song jump >4% on 1 beat in 3 (up to 50%). The walker entrains to music themselves, so smooth tempo beats snapping
+    the phase.
 - **Sync metrics:**
   - % of steps within ±max(60 ms, 8% of the period). The window scales with tempo, as chosen by the user.
   - mean |asynchrony|.
@@ -160,7 +180,8 @@ which drive a virtual BeatClock. `SessionController` hosts it on a coroutine. `S
   each increase ≤ +2%; only RAMPING raises the tempo. Fuzz-tested.
 - **`RampTiming.DEMO`:** 8-step calibration, 8 s lock minimum, 10 s holds, 6 s settle, 8-step window. The full cycle
   takes about a minute. On by default via the "Demo timing" switch.
-- **Follow mode** (`followOnly`): 4-step calibration, then it stays in LOCKING (shown as "FOLLOWING") and never ramps.
+- **Follow mode** (`followOnly`): 8-step calibration (4 gave erratic first tempos), then it stays in LOCKING (shown
+  as "FOLLOWING") and never ramps.
 
 ### 6. Audio — `audio/`
 - **BeatClock** (pure Kotlin):
@@ -171,7 +192,25 @@ which drive a virtual BeatClock. `SessionController` hosts it on a coroutine. `S
   - 48 kHz mono 16-bit `MODE_STREAM` `USAGE_MEDIA`, with an URGENT_AUDIO writer thread.
   - 240-frame chunks and ~100 ms of write-ahead.
   - Every beat is flagged audible or muted.
-  - Sounds: click and woodblock.
+  - Sounds: click, woodblock, music.
+- **Music** (`CueSound.MUSIC` → `BeatClock.music = SongRenderer`):
+  - The renderer fills the audio between beats with the matching song segment, at
+    rate = (target song-beat position − position) / (frames to the cue beat). It re-targets each chunk, so tempo
+    changes, phase nudges and muting just bend the rate.
+  - Each cue beat maps to ½, 1 or 2 song beats, chosen once to keep the rate nearest 1.
+  - Cubic interpolation. The loop is whole bars with a 6 ms crossfade.
+  - While muted, the position still advances; unmuting fades in over 300 ms (already in phase).
+  - Tests: song beats land on clock beats to 0 frames through tempo changes, shifts and loop wraps.
+- **`tools/prepare_song.py`:**
+  - ffmpeg → 48 kHz mono, peak-normalized.
+  - Beats: a spectral-flux onset envelope, autocorrelation tempo (prior ~110 bpm), comb phase, and per-beat tracking
+    (±40 ms) for drift.
+  - **Kick check:** it folds kick-band (40–150 Hz) onsets by beat phase and shifts the grid half a beat if the kicks
+    fall between the beats. Trackers lock onto off-beat snares and hi-hats; it happened with Stayin' Alive.
+  - Reports bpm and grid residual, and warns if the tempo isn't steady. `--preview` writes a clicks-on-beats WAV for
+    an ear check.
+  - Stayin' Alive (Instrumental): 103.7 bpm, 469 beats, residual median 4 ms. The asset is 26 MB, making the APK
+    ~63 MB.
 
 ### 7. Session and reporting
 - `SessionSummary` and the upload aren't built (milestone 6 was skipped).
@@ -202,6 +241,8 @@ session:    { id, startedAt, durationSec, baselineSpm, finalSpm, peakSpm, meanCv
 1. **Simulated walker:**
    - Ramp + Demo timing: calibrate → lock → ramp → overreach → step-back in about 1 minute.
    - Follow mode + the cadence slider shows tracking.
+   - Pick the **Music** cue sound to hear the song's tempo follow (on the phone it glided 92 → 114 bpm over about
+     8 s when the walker sped up).
 2. **Replay:** a bundled real walk (a lower-back one is cleanest).
 3. **Live:**
    - Put the phone **pressed flat or tucked at the lower back**. That gave 70–82% sync in tests; pockets gave
@@ -228,13 +269,15 @@ calibration can validate the absolute timing. If time is short, hard-code a valu
   Timestamps are `Long` nanos.
 - All tunables live in `Tuning.kt`, with units and rationale (including why a value changed). Don't scatter magic
   numbers.
-- **Tests (JVM only, ~77):**
+- **Tests (JVM only, ~84):**
   - detector accuracy on synthetic gait (±20 ms, including weak, slow, freeze, irregular and pocket-artifact cases);
   - cadence/CV;
   - PLL;
   - every RampController transition and cap, plus a fuzz test;
   - closed loop (walker → pipeline → virtual BeatClock): demo cycle, Follow tracking, latency mismatch (no drift),
-    pocket artifact, no step-back cascade, never above the cap;
+    pocket artifact, no step-back cascade, never above the cap, Music glides (p95 beat-to-beat change ≤3.5%) and
+    never re-syncs;
+  - SongRenderer beat landing and continuity;
   - real recordings vs autocorrelation.
 - **Tuning against real data:** replay the recordings through `GaitCuePipeline` offline (seconds, not minutes on the
   device), and compare with the non-causal "oracle" sync bound before changing the algorithm. The current pipeline
@@ -258,3 +301,7 @@ calibration can validate the absolute timing. If time is short, hard-code a valu
 - **Samsung battery:** set the app to Unrestricted and keep it out of Sleeping apps, or sensors stop at screen-off.
 - `ACTIVITY_RECOGNITION` isn't needed for raw `TYPE_ACCELEROMETER`.
 - **Mock data:** the portal's patients are fictional. Keep the "Demo data / fictional" labels.
+- **Music is copyrighted:** songs live only in gitignored folders and the locally built APK. Never commit them, and
+  don't share that APK publicly. The repo is public.
+- **Music makes timing changes audible:** any change to per-beat corrections needs checking with Music, not just
+  the click. Measure the beat-to-beat tempo change of `cue.audibleBeatFrameTimes` (see GaitCuePipelineTest).

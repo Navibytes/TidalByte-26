@@ -86,8 +86,10 @@ object Tuning {
      *  (that corrupts only 2 of the 6). */
     const val CADENCE_WINDOW_STRIDES = 6
 
-    /** A faster estimate for Follow mode: median of this many two-step intervals (~1.5 s of walking). */
-    const val CADENCE_FAST_STRIDES = 3
+    /** A faster estimate for Follow mode: median of this many two-step intervals (~2.5 s of walking). 5, not 3:
+     *  one missed or extra step corrupts two overlapping two-step intervals, which would sway a median of 3. On
+     *  real walks that gave 1-step spikes like 137 or 77 spm during speed changes. */
+    const val CADENCE_FAST_STRIDES = 5
 
     /** Number of two-step intervals used for the stride-time CV (consistency), the standard clinical
      *  variability measure. */
@@ -195,8 +197,9 @@ object Tuning {
 
     // ───────────────────────── Follow mode (demo: the beat always matches the walker) ─────────────────────────
 
-    /** Follow mode needs only enough steps for a first cadence estimate. */
-    const val FOLLOW_CALIBRATION_STEPS = 4
+    /** Steps measured before Follow mode starts the cue. 4 gave erratic first tempos (82–138 spm on real walks),
+     *  which is audible with music. 8 is about 5 s. */
+    const val FOLLOW_CALIBRATION_STEPS = 8
 
     /** Follow mode tracks the steady cadence estimate, but switches to the fast one (and follows it
      *  directly) when the two disagree by more than this fraction in the same direction for
@@ -304,4 +307,25 @@ object Tuning {
     const val DEMO_RAMP_HOLD_SEC = 10.0
     const val DEMO_STEP_BACK_SETTLE_SEC = 6.0
     const val DEMO_SYNC_ROLLING_STEPS = 8
+
+    // ───────────────────────── Music cue: the smooth profile ─────────────────────────
+    // With a song as the cue, every per-beat timing change is a tempo/pitch wobble (with a click it's invisible).
+    // The walker entrains to the music themselves, so smooth tempo beats snapping the phase onto each step. On real
+    // Follow walks the click-tuned settings changed the song's tempo >4% on ~1 beat in 3 (up to 37% on re-syncs).
+    // These apply whenever CueSound.MUSIC is playing, in every mode.
+
+    /** Max tempo change per beat with music, fraction of the period. A 30% pace change takes ~9 beats (~5 s). */
+    const val MUSIC_MAX_PERIOD_CHANGE_PCT = 0.03
+
+    /** Max phase nudge per beat with music, fraction of the period (~14 ms at 104 bpm). */
+    const val MUSIC_MAX_PHASE_SHIFT_PCT = 0.025
+
+    /** Phase gain with music (LOCK/FOLLOW), and the beat-follows-walker tempo gain per step. */
+    const val MUSIC_PHASE_KP = 0.15
+    const val MUSIC_FLL_GAIN = 0.3
+
+    /** With music, Follow jumps to the fast cadence estimate only after this many consecutive steps disagree with
+     *  the steady one by more than this fraction, in the same direction. */
+    const val MUSIC_FAST_SWITCH_PCT = 0.06
+    const val MUSIC_FAST_SWITCH_STEPS = 3
 }

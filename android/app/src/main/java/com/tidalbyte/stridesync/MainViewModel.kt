@@ -6,6 +6,10 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.tidalbyte.stridesync.audio.CueSound
 import com.tidalbyte.stridesync.sensor.ReplayRef
 import com.tidalbyte.stridesync.sensor.ReplaySource
@@ -44,11 +48,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var demoTiming by mutableStateOf(true)
         private set
 
+    /** "Title · 104 bpm" once a bundled song has loaded; null means the Music cue is unavailable. */
+    var songInfo by mutableStateOf<String?>(null)
+        private set
+
     val canStart: Boolean get() = sourceKind != SourceKind.REPLAY || selectedReplay != null
 
     init {
         SessionHub.setCueSound(cueSound)
         refreshReplays()
+        viewModelScope.launch {
+            val song = withContext(Dispatchers.IO) { SessionHub.loadSong(getApplication()) }
+            songInfo = song?.let { "%s · %.0f bpm".format(it.title, it.bpm) }
+        }
     }
 
     fun refreshReplays() {

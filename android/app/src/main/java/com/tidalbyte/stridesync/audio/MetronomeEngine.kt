@@ -24,7 +24,10 @@ import com.tidalbyte.stridesync.cue.CueOutput
  *
  * Setters are thread-safe and can be called from any thread.
  */
-class MetronomeEngine : CueOutput {
+class MetronomeEngine(
+    /** The prepared song for [CueSound.MUSIC]; null if none is bundled (MUSIC then falls back to the click). */
+    private val song: SongTrack? = null,
+) : CueOutput {
 
     /** A placed beat. [tNanos] is its comparison time in elapsedRealtime nanos (DAC presentation +
      *  OUTPUT_LATENCY_MS). [audible] is false for beats placed while muted. */
@@ -91,6 +94,7 @@ class MetronomeEngine : CueOutput {
                     it.gain = if (muted) 0f else Tuning.CUE_GAIN
                     it.maxPeriodChangePct = maxPeriodChangePct
                     it.maxPhaseShiftPct = maxPhaseShiftPct
+                    applySoundLocked(it, sound)
                 }
             clockOffsetNs = SystemClock.elapsedRealtimeNanos() - System.nanoTime()
             hasHwTimestamp = false
@@ -139,7 +143,20 @@ class MetronomeEngine : CueOutput {
 
     fun setSound(s: CueSound) {
         sound = s
-        synchronized(lock) { clock?.sound = sounds.getValue(s) }
+        synchronized(lock) { clock?.let { applySoundLocked(it, s) } }
+    }
+
+    /** MUSIC attaches a SongRenderer, so the song fills the audio locked to the beats. Other sounds detach it. */
+    private fun applySoundLocked(c: BeatClock, s: CueSound) {
+        c.sound = sounds.getValue(s)
+        if (s == CueSound.MUSIC && song != null) {
+            if (c.music == null) {
+                c.music = SongRenderer(song, sr)
+                SLog.i(TAG, "music on: ${song.title} (%.1f bpm native)".format(song.bpm))
+            }
+        } else {
+            c.music = null
+        }
     }
 
     @Volatile private var maxPeriodChangePct = Tuning.BEAT_MAX_PERIOD_CHANGE_PCT

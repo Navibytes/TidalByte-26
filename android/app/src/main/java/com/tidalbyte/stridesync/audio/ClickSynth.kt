@@ -7,14 +7,14 @@ import kotlin.math.min
 import kotlin.math.sin
 import kotlin.random.Random
 
-/** The cue sounds, precomputed as short enveloped bursts. Pure Kotlin. */
-enum class CueSound(val label: String) { CLICK("Click"), WOODBLOCK("Woodblock") }
+/** The cue sounds. CLICK and WOODBLOCK are precomputed bursts. MUSIC plays the prepared song (SongRenderer). */
+enum class CueSound(val label: String) { CLICK("Click"), WOODBLOCK("Woodblock"), MUSIC("Music") }
 
 object ClickSynth {
 
     /** Renders [sound] as mono float PCM in [-1, 1], peak-normalized to [peak]. */
     fun render(sound: CueSound, sampleRate: Int, peak: Float = 0.9f): FloatArray = when (sound) {
-        CueSound.CLICK -> click(sampleRate)
+        CueSound.CLICK, CueSound.MUSIC -> click(sampleRate) // MUSIC falls back to the click if no song is loaded
         CueSound.WOODBLOCK -> woodblock(sampleRate)
     }.also { normalize(it, peak) }
 

@@ -52,6 +52,9 @@ class GaitCuePipeline(
     val followOnly: Boolean = false,
     private val log: (component: String, msg: String) -> Unit = { _, _ -> },
 ) {
+    /** True while a song is the cue: the smooth profile (see Tuning, "Music cue"). May change mid-session. */
+    @Volatile var music: Boolean = false
+    private var appliedMusic: Boolean? = null
     private val detector = StepDetector()
     private val cadence = CadenceEstimator()
     private val pll = PhaseLockedLoop()
@@ -82,14 +85,24 @@ class GaitCuePipeline(
 
     init {
         cue.setMuted(ramp.muted) // CALIBRATING is silent
-        if (followOnly) {
-            cue.setMaxPerBeatChange(Tuning.FOLLOW_MAX_PERIOD_CHANGE_PCT, Tuning.FOLLOW_MAX_PHASE_SHIFT_PCT)
-        } else {
-            cue.setMaxPerBeatChange(Tuning.BEAT_MAX_PERIOD_CHANGE_PCT, Tuning.BEAT_MAX_PHASE_SHIFT_PCT)
+        applyProfile()
+    }
+
+    /** Per-beat limits for the current profile: music (smooth) > follow (fast) > ramp (spec's 5%). */
+    private fun applyProfile() {
+        val m = music
+        if (m == appliedMusic) return
+        appliedMusic = m
+        when {
+            m -> cue.setMaxPerBeatChange(Tuning.MUSIC_MAX_PERIOD_CHANGE_PCT, Tuning.MUSIC_MAX_PHASE_SHIFT_PCT)
+            followOnly -> cue.setMaxPerBeatChange(Tuning.FOLLOW_MAX_PERIOD_CHANGE_PCT, Tuning.FOLLOW_MAX_PHASE_SHIFT_PCT)
+            else -> cue.setMaxPerBeatChange(Tuning.BEAT_MAX_PERIOD_CHANGE_PCT, Tuning.BEAT_MAX_PHASE_SHIFT_PCT)
         }
+        if (appliedMusic != null) log("cue", "profile: ${if (m) "music (smooth)" else if (followOnly) "follow" else "ramp"}")
     }
 
     fun onSample(s: AccelSample): List<StepReport> {
+        applyProfile()
         var out: MutableList<StepReport>? = null
         for (step in detector.process(s)) {
             if (!cadence.addStep(step.tNanos)) continue
@@ -102,7 +115,7 @@ class GaitCuePipeline(
 
     private fun onStep(tNanos: Long, amplitude: Double): StepReport {
         val gait = cadence.stats()
-        val coupling = ramp.coupling
+        val coupling = musicCoupling(ramp.coupling)
         val periodBefore = cue.periodNs
         var errorNs: Long? = null
         var rawNs: Long? = null
@@ -172,10 +185,19 @@ class GaitCuePipeline(
         )
     }
 
+    /** With music, swap in the gentle couplings (ACQUIRE stays: it's muted and inaudible). */
+    private fun musicCoupling(c: com.tidalbyte.stridesync.cue.Coupling?): com.tidalbyte.stridesync.cue.Coupling? = when {
+        !music || c == null -> c
+        c === com.tidalbyte.stridesync.cue.Coupling.ACQUIRE -> c
+        c === com.tidalbyte.stridesync.cue.Coupling.LEAD -> com.tidalbyte.stridesync.cue.Coupling.MUSIC_LEAD
+        else -> com.tidalbyte.stridesync.cue.Coupling.MUSIC_FOLLOW
+    }
+
     /** Follow mode only: true when the error has exceeded FOLLOW_RESYNC_FRAC of the period, in the same
-     *  direction, for FOLLOW_RESYNC_STEPS steps running. Resets the count when it fires. */
+     *  direction, for FOLLOW_RESYNC_STEPS steps running. Resets the count when it fires. Never with music (a jump
+     *  would be an audible tempo lurch; the walker re-aligns to the song themselves). */
     private fun resyncDue(errorNs: Long, periodNs: Double): Boolean {
-        if (!followOnly || ramp.state != CueState.LOCKING || ramp.acquiring || cue.muted) {
+        if (!followOnly || music || ramp.state != CueState.LOCKING || ramp.acquiring || cue.muted) {
             bigErrorSteps = 0
             return false
         }
@@ -204,14 +226,22 @@ class GaitCuePipeline(
         val fast = gait.fastSpm ?: steady
         val current = 60e9 / periodBefore
         val disagree = (fast - steady) / steady
+        val switchPct = if (music) Tuning.MUSIC_FAST_SWITCH_PCT else Tuning.FOLLOW_FAST_SWITCH_PCT
+        val switchSteps = if (music) Tuning.MUSIC_FAST_SWITCH_STEPS else Tuning.FOLLOW_FAST_SWITCH_STEPS
         fastDisagreeSteps = when {
-            disagree > Tuning.FOLLOW_FAST_SWITCH_PCT -> if (fastDisagreeSteps > 0) fastDisagreeSteps + 1 else 1
-            disagree < -Tuning.FOLLOW_FAST_SWITCH_PCT -> if (fastDisagreeSteps < 0) fastDisagreeSteps - 1 else -1
+            disagree > switchPct -> if (fastDisagreeSteps > 0) fastDisagreeSteps + 1 else 1
+            disagree < -switchPct -> if (fastDisagreeSteps < 0) fastDisagreeSteps - 1 else -1
             else -> 0
         }
-        val changing = followOnly && abs(fastDisagreeSteps) >= Tuning.FOLLOW_FAST_SWITCH_STEPS
+        val changing = followOnly && abs(fastDisagreeSteps) >= switchSteps
         val goal = if (changing) fast else steady
-        val next = if (changing || ramp.acquiring) goal else current + Tuning.FLL_GAIN * (goal - current)
+        val gain = if (music) Tuning.MUSIC_FLL_GAIN else Tuning.FLL_GAIN
+        // With music, even a real pace change is approached gradually (BeatClock also caps it at 3% per beat).
+        val next = when {
+            ramp.acquiring -> goal
+            changing && !music -> goal
+            else -> current + gain * (goal - current)
+        }
         val target = 60e9 / ramp.capBpm(next)
         if (abs(target - periodBefore) / periodBefore >= Tuning.FLL_MIN_UPDATE_PCT) cue.setPeriodNs(target)
     }

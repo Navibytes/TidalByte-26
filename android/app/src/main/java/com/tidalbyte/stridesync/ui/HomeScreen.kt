@@ -118,15 +118,24 @@ fun HomeScreen(vm: MainViewModel) {
             StatusCard(state)
             if (state.recentEvents.isNotEmpty()) EventsCard(state)
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Cue sound", style = MaterialTheme.typography.bodyMedium)
-                CueSound.entries.forEach { snd ->
-                    FilterChip(
-                        selected = vm.cueSound == snd,
-                        onClick = { vm.updateCueSound(snd) },
-                        label = { Text(snd.label) },
-                    )
+            Column {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Cue sound", style = MaterialTheme.typography.bodyMedium)
+                    CueSound.entries.forEach { snd ->
+                        FilterChip(
+                            selected = vm.cueSound == snd,
+                            onClick = { vm.updateCueSound(snd) },
+                            enabled = snd != CueSound.MUSIC || vm.songInfo != null,
+                            label = { Text(snd.label) },
+                        )
+                    }
                 }
+                Text(
+                    vm.songInfo?.let { "Music: $it. Its tempo follows the cue (the pitch shifts slightly)." }
+                        ?: "Music: no song bundled (see tools/prepare_song.py).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

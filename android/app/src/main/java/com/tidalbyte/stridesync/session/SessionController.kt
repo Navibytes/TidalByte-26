@@ -74,10 +74,18 @@ class SessionController(private val scope: CoroutineScope) {
     @Volatile private var engine: MetronomeEngine? = null
     @Volatile private var cueSound = CueSound.CLICK
 
+    /** The bundled song for the Music cue, once loaded (SessionHub loads it at startup). */
+    @Volatile var song: com.tidalbyte.stridesync.audio.SongTrack? = null
+
     fun setCueSound(sound: CueSound) {
         cueSound = sound
         engine?.setSound(sound)
+        pipeline?.music = isMusic(sound)
     }
+
+    @Volatile private var pipeline: GaitCuePipeline? = null
+
+    private fun isMusic(sound: CueSound) = sound == CueSound.MUSIC && song != null
 
     /**
      * Starts a session on [source]. If [recordTo] is set, raw samples are also written there as CSV.
@@ -99,13 +107,14 @@ class SessionController(private val scope: CoroutineScope) {
         val recorder = recordTo?.let { SampleRecorder(it, scope) }
         val id = ++sessionId
 
-        val eng = MetronomeEngine().apply {
+        val eng = MetronomeEngine(song).apply {
             setSound(cueSound)
             setMuted(true) // calibration is silent
             onBeat = ::onBeatPlaced
         }
         engine = eng
-        val pipe = GaitCuePipeline(eng, timing, followOnly, log = SLog::d)
+        val pipe = GaitCuePipeline(eng, timing, followOnly, log = SLog::d).also { it.music = isMusic(cueSound) }
+        pipeline = pipe
         if (source is SimulatedWalkerSource) source.beatSource = eng::audibleBeatsHeardNs
         eng.start(Tuning.CUE_DEFAULT_BPM)
 
@@ -194,6 +203,7 @@ class SessionController(private val scope: CoroutineScope) {
         job = null
         engine?.stop()
         engine = null
+        pipeline = null
         _state.update { it.copy(running = false, cueBpm = null) }
         SLog.i(TAG, "session stop")
     }

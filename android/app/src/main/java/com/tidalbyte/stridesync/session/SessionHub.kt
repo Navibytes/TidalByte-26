@@ -75,6 +75,14 @@ object SessionHub {
 
     fun setCueSound(sound: CueSound) = controller.setCueSound(sound)
 
+    /** The bundled song for the Music cue (null if none). Call loadSong once, off the main thread. */
+    val song: com.tidalbyte.stridesync.audio.SongTrack? get() = controller.song
+
+    fun loadSong(context: Context): com.tidalbyte.stridesync.audio.SongTrack? {
+        controller.song?.let { return it }
+        return com.tidalbyte.stridesync.audio.SongLoader.load(context.applicationContext).also { controller.song = it }
+    }
+
     // ── Called by CueService ──
 
     internal fun takePending(): SourceSpec? = pending.also { pending = null }

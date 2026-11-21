@@ -24,6 +24,12 @@ data class Coupling(
         /** Follow mode: like LOCK, but recovers phase faster. */
         val FOLLOW = Coupling("follow", Tuning.PLL_LOCK_KP, Tuning.PLL_LOCK_KI, maxShiftPct = Tuning.FOLLOW_MAX_PHASE_SHIFT_PCT)
 
+        /** With a song as the cue: gentle phase nudges whenever the beat follows (LOCK or FOLLOW). */
+        val MUSIC_FOLLOW = Coupling("music", Tuning.MUSIC_PHASE_KP, 0.0, maxShiftPct = Tuning.MUSIC_MAX_PHASE_SHIFT_PCT)
+
+        /** With a song as the cue while leading: LEAD's gain, with music's per-beat cap. */
+        val MUSIC_LEAD = Coupling("music-lead", Tuning.PLL_LEAD_KP, 0.0, maxShiftPct = Tuning.MUSIC_MAX_PHASE_SHIFT_PCT)
+
         /** The beat leads and the walker must entrain. */
         val LEAD = Coupling("lead", Tuning.PLL_LEAD_KP, Tuning.PLL_LEAD_KI)
 

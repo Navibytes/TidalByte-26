@@ -117,13 +117,23 @@ class CadenceEstimatorTest {
     fun fastEstimate_respondsSoonerThanMain() {
         val est = CadenceEstimator()
         var t = feed(est, List(10) { 600L }) // 100 spm
-        for (i in 0 until 3) {
+        for (i in 0 until 4) {
             t += 500 * ms // speeds up to 120 spm
             est.addStep(t)
         }
+        // Fast (median of 5 two-step intervals) has switched; main (median of 6) is still in between.
         val s = est.stats()
         assertEquals(120.0, s.fastSpm!!, 1e-9)
-        assertTrue("main estimate still mostly old: ${s.spm}", s.spm!! < 110.0)
+        assertTrue("main estimate still partly old: ${s.spm}", s.spm!! < 115.0)
+    }
+
+    @Test
+    fun fastEstimate_ignoresOneGlitchStep() {
+        val est = CadenceEstimator()
+        // A missed detection doubles one interval, which corrupts 2 overlapping two-step intervals. A median of 5
+        // shrugs that off.
+        feed(est, listOf(600, 600, 600, 600, 600, 600, 600, 600, 1200, 600))
+        assertEquals(100.0, est.stats().fastSpm!!, 1e-9)
     }
 
     @Test

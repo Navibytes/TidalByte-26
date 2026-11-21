@@ -59,6 +59,16 @@ class BeatClock(
 
     private var pendingShiftUnclamped = false
 
+    /** When set, a song fills the audio between beats instead of the click [sound] (see SongRenderer). */
+    var music: SongRenderer? = null
+        set(value) {
+            field = value
+            voices.clear()
+        }
+
+    private var placed = LongArray(4)
+    private var placedCount = 0
+
     /** Requests that the next beat move by [frames] (positive = later). This replaces any request that
      *  hasn't been applied yet. [unclamped] skips the per-beat limit for this one shift (a deliberate re-sync). */
     fun requestPhaseShift(frames: Double, unclamped: Boolean = false) {
@@ -72,16 +82,27 @@ class BeatClock(
      */
     fun render(chunkStart: Long, out: FloatArray, len: Int = out.size, onBeat: (frame: Long) -> Unit = {}) {
         val chunkEnd = chunkStart + len
+        placedCount = 0
+        var plannedNext: Double
         while (true) {
             val plan = planNext()
+            plannedNext = plan.ideal
             var frame = plan.ideal.roundToLong()
             if (frame >= chunkEnd) break
             if (frame < chunkStart) frame = chunkStart // a late shift can't reach into already-written audio
             commit(plan, frame)
+            if (placedCount == placed.size) placed = placed.copyOf(placed.size * 2)
+            placed[placedCount++] = frame
             onBeat(frame)
         }
 
         out.fill(0f, 0, len)
+        val m = music
+        if (m != null) {
+            // The song fills the audio, bent so each of its beats lands on the beat frames just placed.
+            m.render(chunkStart, out, len, placed, placedCount, plannedNext, periodFrames, gain)
+            return
+        }
         val it = voices.iterator()
         while (it.hasNext()) {
             val v = it.next()
@@ -114,6 +135,6 @@ class BeatClock(
         // continue from where it actually sounded.
         lastBeatIdeal = if (frame > plan.ideal.roundToLong()) frame.toDouble() else plan.ideal
         beatCount++
-        voices += Voice(sound, frame, gain)
+        if (music == null) voices += Voice(sound, frame, gain)
     }
 }

@@ -24,3 +24,7 @@ firestore-debug.log
 *.local
 
 .DS_Store
+
+# Cue music: user-provided songs stay out of git (the repo is public).
+/music/
+android/app/src/main/assets/music/
