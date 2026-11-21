@@ -87,7 +87,7 @@ fun HomeScreen(vm: MainViewModel) {
                                 selected = vm.cueMode == mode,
                                 onClick = { vm.updateCueMode(mode) },
                                 shape = SegmentedButtonDefaults.itemShape(i, CueMode.entries.size),
-                            ) { Text(if (mode == CueMode.FOLLOW) "Follow cadence" else "Fixed tempo") }
+                            ) { Text(mode.label) }
                         }
                     }
                     if (vm.cueMode == CueMode.FIXED) {
@@ -128,7 +128,13 @@ fun HomeScreen(vm: MainViewModel) {
                             pulseColor = MaterialTheme.colorScheme.tertiary,
                         )
                     }
-                    Spacer(Modifier.height(16.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        if (state.running) state.phase.label else "Stopped",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                    )
+                    Spacer(Modifier.height(12.dp))
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly,
@@ -136,6 +142,15 @@ fun HomeScreen(vm: MainViewModel) {
                         Stat("CV", state.cv?.let { "%.1f %%".format(it * 100) } ?: "—")
                         Stat("Steps", "${state.stepCount}")
                         Stat("Elapsed", formatElapsed(state.elapsedSec))
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                    ) {
+                        Stat("In sync", state.syncPct?.let { "%.0f %%".format(it * 100) } ?: "—")
+                        Stat("Mean async", state.meanAbsAsyncMs?.let { "%.0f ms".format(it) } ?: "—")
+                        Stat("Last step", state.lastErrorMs?.let { "%+.0f ms".format(it) } ?: "—")
                     }
                 }
             }

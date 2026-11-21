@@ -20,7 +20,7 @@ class MainViewModel : ViewModel() {
 
     var simCadence by mutableFloatStateOf(WalkerConfig.PARKINSONIAN.cadenceSpm.toFloat())
         private set
-    var cueMode by mutableStateOf(CueMode.FOLLOW)
+    var cueMode by mutableStateOf(CueMode.LOCK)
         private set
     var fixedBpm by mutableFloatStateOf(Tuning.CUE_DEFAULT_BPM.toFloat())
         private set

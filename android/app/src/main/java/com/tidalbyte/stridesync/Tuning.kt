@@ -125,4 +125,48 @@ object Tuning {
 
     /** Output gain applied to the cue sounds, 0..1. Leaves headroom below full scale. */
     const val CUE_GAIN = 0.8f
+
+    // ───────────────────────── Phase lock (cue/PhaseLockedLoop) ─────────────────────────
+    // Per step: error = step time − nearest beat time (wrapped to ±period/2). The upcoming beat shifts by
+    // kP·error and the period changes by kI·error, each clamped per beat (BEAT_MAX_*_PCT). For a 1:1
+    // step/beat loop, kI = kP²/4 is critically damped: the error decays by a factor (1 − kP/2) per step.
+
+    /** Strong coupling while locking: the beat follows the walker. 0.7 → error ×0.65 per step. A walker's
+     *  unaided step timing drifts like a random walk, so following closely beats smoothing. In closed-loop
+     *  tests, 0.5 lagged cadence drift, and 0.8 started ringing (steps are reported up to ~0.3 s late).
+     *  kI = kP²/4 (critical damping). */
+    const val PLL_LOCK_KP = 0.7
+    const val PLL_LOCK_KI = 0.1225
+
+    /** Weak coupling while leading (ramping, or a fixed tempo): a gentle phase nudge and no period change,
+     *  so the beat keeps its tempo and the walker has to come to it. If the walker doesn't entrain, the
+     *  steady-state error ≈ tempo mismatch / kP, which shows up as lost sync. That's the signal to step back. */
+    const val PLL_LEAD_KP = 0.15
+    const val PLL_LEAD_KI = 0.0
+
+    /** Coupling while acquiring the initial lock with the cue muted. Nothing is audible, so the per-beat
+     *  clamps are lifted and the phase snaps in within a few steps. */
+    const val PLL_ACQUIRE_KP = 0.7
+    const val PLL_ACQUIRE_KI = 0.0
+
+    /** Consecutive in-window steps needed before a muted, acquiring cue becomes audible. */
+    const val PLL_ACQUIRE_STEPS = 2
+
+    /** Lock mode only: if the cue tempo and the measured cadence disagree by more than this fraction, the
+     *  tempo jumps straight to the cadence (still slew-limited per beat) instead of waiting for the slow
+     *  integrator. A PLL can't pull in a large frequency error by itself. 6% is about 4× the noise of the
+     *  median-of-8 cadence estimate at a 3% interval CV. */
+    const val PLL_FREQ_RESET_PCT = 0.06
+
+    // ───────────────────────── Sync metrics (cue/SyncTracker) ─────────────────────────
+
+    /** A step counts as "in sync" if |step − nearest beat| ≤ this, ms. */
+    const val SYNC_WINDOW_MS = 60
+
+    /** The fraction of recent steps that must be in sync for the walker to count as synced (used by the
+     *  ramp in M4). */
+    const val SYNC_REQUIRED_PCT = 0.8
+
+    /** The rolling sync metrics cover this many recent steps. */
+    const val SYNC_ROLLING_STEPS = 16
 }

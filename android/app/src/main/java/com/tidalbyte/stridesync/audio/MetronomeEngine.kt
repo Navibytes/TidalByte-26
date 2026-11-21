@@ -8,6 +8,7 @@ import android.os.Process
 import android.os.SystemClock
 import com.tidalbyte.stridesync.SLog
 import com.tidalbyte.stridesync.Tuning
+import com.tidalbyte.stridesync.cue.CueOutput
 
 /**
  * A synthesized metronome on an [AudioTrack] (48 kHz mono 16-bit, MODE_STREAM, USAGE_MEDIA), fed by a
@@ -23,7 +24,7 @@ import com.tidalbyte.stridesync.Tuning
  *
  * Setters are thread-safe and can be called from any thread.
  */
-class MetronomeEngine {
+class MetronomeEngine : CueOutput {
 
     /** A placed beat. [tNanos] is the predicted time the beat is heard, elapsedRealtime nanos. */
     data class Beat(val index: Long, val frame: Long, val tNanos: Long)
@@ -49,7 +50,7 @@ class MetronomeEngine {
     @Volatile var sound: CueSound = CueSound.CLICK
         private set
 
-    @Volatile var muted: Boolean = false
+    @Volatile override var muted: Boolean = false
         private set
 
     /** Called on the audio thread when a beat is placed, about a write-ahead before it's heard. Keep it
@@ -111,16 +112,26 @@ class MetronomeEngine {
 
     /** Moves the next unplayed beat by [ns] (positive = later), clamped per beat. Replaces any pending
      *  request. Used by the PLL. */
-    fun requestPhaseShiftNs(ns: Long) {
+    override fun requestPhaseShiftNs(ns: Long) {
         synchronized(lock) { clock?.requestPhaseShift(ns * sr / 1e9) }
     }
+
+    override val periodNs: Double
+        get() = synchronized(lock) { clock?.targetPeriodFrames?.let { it * 1e9 / sr } } ?: (60e9 / bpm)
+
+    override fun setPeriodNs(periodNs: Double) {
+        if (!(periodNs > 0.0) || !periodNs.isFinite()) return
+        setBpm(60e9 / periodNs)
+    }
+
+    override fun recentBeatTimes(): List<Long> = synchronized(lock) { recent.map { frameToElapsedNanosLocked(it.frame) } }
 
     fun setSound(s: CueSound) {
         sound = s
         synchronized(lock) { clock?.sound = sounds.getValue(s) }
     }
 
-    fun setMuted(m: Boolean) {
+    override fun setMuted(m: Boolean) {
         muted = m
         synchronized(lock) { clock?.gain = if (m) 0f else Tuning.CUE_GAIN }
     }

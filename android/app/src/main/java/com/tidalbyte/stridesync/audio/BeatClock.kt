@@ -15,6 +15,8 @@ import kotlin.math.roundToLong
  *  - The period moves toward its target by at most [Tuning.BEAT_MAX_PERIOD_CHANGE_PCT] per beat.
  *  - A requested phase shift is applied to the next beat, clamped to [Tuning.BEAT_MAX_PHASE_SHIFT_PCT] of
  *    the period. Any remainder is discarded, because the PLL re-measures the error and asks again each step.
+ *  - While muted ([gain] == 0), both limits are lifted. Nothing is audible, so the schedule can jump
+ *    straight to the right tempo and phase before the cue is unmuted.
  */
 class BeatClock(
     initialPeriodFrames: Double,
@@ -91,6 +93,7 @@ class BeatClock(
 
     private fun planNext(): Plan {
         if (lastBeatIdeal.isNaN()) return Plan(firstBeatFrame, periodFrames)
+        if (gain == 0f) return Plan(lastBeatIdeal + targetPeriodFrames + pendingShiftFrames, targetPeriodFrames)
         val maxDp = maxPeriodChangePct * periodFrames
         val period = periodFrames + (targetPeriodFrames - periodFrames).coerceIn(-maxDp, maxDp)
         val maxShift = maxPhaseShiftPct * period
