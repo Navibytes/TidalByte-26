@@ -101,12 +101,21 @@ object Tuning {
      *  scheduling hiccups without underruns. */
     const val AUDIO_WRITE_AHEAD_MS = 100
 
-    /** Added to the DAC presentation time from AudioTrack.getTimestamp() to get the time a beat is
-     *  "heard", ms. This also absorbs the step detector's constant peak-vs-heel-strike lag (~63 ms in the
-     *  synthetic tests), because the PLL compares beat times against detected-step times. Starting guess:
-     *  63 ms lag + ~12 ms residual speaker latency. Calibrate on device. Bluetooth would add 150–300 ms,
-     *  so don't use it. */
-    const val OUTPUT_LATENCY_MS = 75
+    /** How far the detected step (the filtered peak) trails the true heel strike, ms. Measured as a near-
+     *  constant ~63 ms in the synthetic detector tests (StepDetectorTest prints it). Real pocket data may
+     *  differ, so calibrate it. */
+    const val DETECTOR_LAG_MS = 63
+
+    /** Residual latency from AudioTrack.getTimestamp()'s DAC presentation time to sound in the ear, ms.
+     *  Small for the phone speaker or wired earbuds. Bluetooth would add 150–300 ms and vary, so don't use
+     *  it. Starting guess; calibrate on device. */
+    const val SPEAKER_LATENCY_MS = 12
+
+    /** Added to the DAC presentation time to get a beat's comparison time, ms. The PLL compares beats
+     *  against *detected* steps, which lag the heel strike by DETECTOR_LAG_MS, so the beat time gets the
+     *  same lag plus the speaker latency. When the PLL zeroes its error, the heard beat coincides with the
+     *  heel strike. */
+    const val OUTPUT_LATENCY_MS = SPEAKER_LATENCY_MS + DETECTOR_LAG_MS
 
     /** Max change of the beat period per beat, as a fraction of the period. Stops the cue lurching when
      *  the target tempo jumps (for example 90 → 60 takes ~8 beats). */
@@ -138,10 +147,13 @@ object Tuning {
     const val PLL_LOCK_KP = 0.7
     const val PLL_LOCK_KI = 0.1225
 
-    /** Weak coupling while leading (ramping, or a fixed tempo): a gentle phase nudge and no period change,
-     *  so the beat keeps its tempo and the walker has to come to it. If the walker doesn't entrain, the
-     *  steady-state error ≈ tempo mismatch / kP, which shows up as lost sync. That's the signal to step back. */
-    const val PLL_LEAD_KP = 0.15
+    /** Weak coupling while leading (ramping, or holding): a gentle phase nudge and no period change, so
+     *  the beat keeps its tempo and the walker has to come to it. Keep kP small: each nudge with a
+     *  persistent error effectively lengthens the beat a little, so the walker hears a slower cue than
+     *  commanded. In closed-loop tests, 0.15 sagged the heard tempo enough to push steps toward the edge
+     *  of the sync window. If the walker doesn't entrain, the steady-state error ≈ tempo mismatch / kP,
+     *  which shows up as lost sync. That's the signal to step back. */
+    const val PLL_LEAD_KP = 0.1
     const val PLL_LEAD_KI = 0.0
 
     /** Coupling while acquiring the initial lock with the cue muted. Nothing is audible, so the per-beat
@@ -160,13 +172,59 @@ object Tuning {
 
     // ───────────────────────── Sync metrics (cue/SyncTracker) ─────────────────────────
 
-    /** A step counts as "in sync" if |step − nearest beat| ≤ this, ms. */
+    /** A step counts as "in sync" if |step − nearest beat| ≤ max(SYNC_WINDOW_MS, SYNC_WINDOW_PERIOD_PCT ×
+     *  beat period). The window scales with tempo because slow Parkinson's gait has proportionally larger
+     *  step-to-step jitter. At a 5% interval CV and 62 spm, steps wander ±48 ms by themselves, so a fixed
+     *  ±60 ms caps even a perfectly following beat near 79% (chosen with the user, 2026-11-21).
+     *  ±60 ms floor at ≥ 80 bpm; ±80 ms at 60 bpm. */
     const val SYNC_WINDOW_MS = 60
+    const val SYNC_WINDOW_PERIOD_PCT = 0.08
 
-    /** The fraction of recent steps that must be in sync for the walker to count as synced (used by the
-     *  ramp in M4). */
+    /** The fraction of recent steps that must be in sync for the walker to count as synced. This gates
+     *  LOCKING → RAMPING and every ramp step. */
     const val SYNC_REQUIRED_PCT = 0.8
+
+    /** Below this fraction of in-sync recent steps, sync is lost and the ramp steps back. Between this and
+     *  SYNC_REQUIRED_PCT, sync is "marginal": hold, don't advance. */
+    const val SYNC_LOST_PCT = 0.5
 
     /** The rolling sync metrics cover this many recent steps. */
     const val SYNC_ROLLING_STEPS = 16
+
+    // ───────────────────────── Ramp (cue/RampController) ─────────────────────────
+    // CALIBRATING → LOCKING → RAMPING ⇄ HOLDING, plus STEPPING_BACK and PAUSED. The hard caps are
+    // enforced only in RampController.capBpm(), which every tempo sent to the metronome passes through.
+
+    /** Steps measured (with the cue silent) to establish the baseline cadence. */
+    const val CALIBRATION_STEPS = 20
+
+    /** Minimum time with an audible, locked cue before ramping may start, s. That plus a full in-sync
+     *  rolling window is the "sustained period in sync". */
+    const val LOCK_MIN_SEC = 20.0
+
+    /** One ramp step raises the tempo by at most this fraction of the previous tempo. A HARD CAP. */
+    const val RAMP_STEP_PCT = 0.02
+
+    /** Each ramp step is held this long before the next may happen (only if still in sync), s. Holding
+     *  also waits this long in good sync before resuming the ramp. */
+    const val RAMP_HOLD_SEC = 45.0
+
+    /** Tempo never exceeds baseline × (1 + MAX_RAMP_PCT). A HARD CAP. */
+    const val MAX_RAMP_PCT = 0.10
+
+    /** An absolute tempo ceiling, bpm, whatever the baseline. A HARD CAP. Brisk healthy walking is
+     *  ~110–120 spm; cueing a Parkinson's walker above 130 has no plausible benefit. */
+    const val ABS_MAX_CUE_BPM = 130.0
+
+    /** After a step back, the lower tempo is held this long (sync not judged) before HOLDING, s. About 2
+     *  entrainment time constants (~10 s each): the walker needs this long to re-adapt from being pushed.
+     *  At 10 s, the re-adaptation steps were judged as "sync lost" again, and the ramp cascaded down. */
+    const val STEP_BACK_SETTLE_SEC = 20.0
+
+    /** No steps for this long means PAUSED (a possible freeze or stop): the tempo freezes and never
+     *  increases, and the beat keeps playing to help a restart, s. */
+    const val PAUSE_SEC = 3.0
+
+    /** If measured cadence falls this fraction below the cue tempo while ramping/holding, step back at once. */
+    const val CADENCE_DROP_PCT = 0.15
 }

@@ -45,6 +45,24 @@ data class WalkerConfig(
     /** Timestamp jitter, µs. Hardware timestamps aren't perfectly regular. */
     val timestampJitterUs: Double = 300.0,
     val seed: Long = 1L,
+
+    // ── Entrainment to the cue (used only when a beat source is attached and beats are audible) ──
+    /** Whether the walker responds to the cue at all. Turn it off to show a walker who ignores the beat. */
+    val entrains: Boolean = true,
+    /** The walker's cadence approaches the cue tempo with this time constant, s. */
+    val entrainTauSec: Double = 10.0,
+    /** Partial entrainment: the cadence settles at natural + strength × (cue − natural). Below 1, the walker
+     *  keeps a pull toward its own preferred cadence. That pull anchors the pair while the beat follows the
+     *  walker (LOCKING); without it, beat and walker random-walk together. */
+    val entrainStrength: Double = 0.9,
+    /** Cadence drift is scaled by this while entrained. Rhythmic cueing reduces gait variability. */
+    val cuedDriftScale: Double = 0.3,
+    /** Per-step phase correction: this fraction of the predicted asynchrony to the nearest heard beat is
+     *  removed from the next interval. Human tapping studies put it around 0.2–0.5. */
+    val phaseCorrection: Double = 0.3,
+    /** The fastest cadence the walker can sustain is natural × (1 + this). A cue beyond it can't be
+     *  followed: steps fall behind, sync is lost, and the ramp has to step back. */
+    val abilityHeadroomPct: Double = 0.06,
 ) {
     companion object {
         /** A typical demo patient: slowish, moderately weak strikes, some variability. */
@@ -85,6 +103,16 @@ data class WalkerConfig(
  */
 class SimulatedWalker(private val config: WalkerConfig, private val startNanos: Long) {
 
+    /**
+     * When set, it returns the times (ns, sample timebase) at which recent *audible* beats are heard. The
+     * walker uses only beats heard up to the current sample time, so it partially entrains: its cadence
+     * moves toward the cue tempo (time constant [WalkerConfig.entrainTauSec], up to its ability ceiling),
+     * and each step corrects part of its asynchrony. With no audible cue, it walks at its own cadence,
+     * exactly as without a beat source.
+     */
+    @Volatile
+    var beatSource: (() -> List<Long>)? = null
+
     private class Strike(val t: Double, val amp: Double, val interval: Double, val index: Int)
 
     private val rng = Random(config.seed)
@@ -100,6 +128,10 @@ class SimulatedWalker(private val config: WalkerConfig, private val startNanos: 
     private var cadence = config.cadenceSpm
     private var drift = 0.0
     private var strikeCount = 0
+    private var nowSec = 0.0
+
+    /** The walker's current underlying cadence, spm (before drift and jitter). */
+    val currentCadenceSpm: Double get() = cadence
 
     // Strikes whose waveform may still affect the signal, plus the one upcoming strike (always last).
     private val strikes = ArrayDeque<Strike>()
@@ -125,6 +157,7 @@ class SimulatedWalker(private val config: WalkerConfig, private val startNanos: 
         sampleIndex++
 
         val ts = (tNs - startNanos) / 1e9
+        nowSec = ts
         scheduleStrikesThrough(ts + 0.1)
         while (strikes.size > 1 && strikes.first().t < ts - MAX_SWAY_SPAN_SEC) strikes.removeFirst()
 
@@ -166,7 +199,7 @@ class SimulatedWalker(private val config: WalkerConfig, private val startNanos: 
     private fun scheduleStrikesThrough(horizon: Double) {
         while (nextStrikeT <= horizon) {
             val t = nextStrikeT
-            val interval = nextInterval()
+            val interval = nextInterval(t)
             var following = t + interval
             val freeze = config.freezes.firstOrNull { following >= it.startSec && following < it.startSec + it.durationSec }
             if (freeze != null) following = freeze.startSec + freeze.durationSec + 0.4
@@ -181,13 +214,54 @@ class SimulatedWalker(private val config: WalkerConfig, private val startNanos: 
         }
     }
 
-    private fun nextInterval(): Double {
-        val target = targetCadenceSpm
-        cadence += (target - cadence) * 0.25
-        drift = drift * 0.97 + gaussian() * config.driftSpm * 0.25
+    private fun nextInterval(strikeT: Double): Double {
+        val cue = if (config.entrains) heardCue() else null
+        if (cue == null) {
+            cadence += (targetCadenceSpm - cadence) * 0.25
+        } else {
+            val ability = targetCadenceSpm * (1 + config.abilityHeadroomPct)
+            val pulled = targetCadenceSpm + config.entrainStrength * (60.0 / cue.periodSec - targetCadenceSpm)
+            val goal = minOf(pulled, ability)
+            val prelim = 60.0 / (cadence + drift)
+            cadence += (goal - cadence) * (1 - exp(-prelim / config.entrainTauSec))
+        }
+        val driftAmp = if (cue == null) config.driftSpm else config.driftSpm * config.cuedDriftScale
+        drift = drift * 0.97 + gaussian() * driftAmp * 0.25
         val spm = (cadence + drift).coerceIn(20.0, 250.0)
         val nominal = 60.0 / spm
-        return (nominal * (1.0 + config.intervalCv * gaussian())).coerceIn(nominal * 0.6, nominal * 1.4)
+        var interval = (nominal * (1.0 + config.intervalCv * gaussian())).coerceIn(nominal * 0.6, nominal * 1.4)
+        if (cue != null) {
+            // Correct part of the predicted asynchrony to the nearest heard (or anticipated) beat. The walker
+            // can't step faster than its ability ceiling, so a too-fast cue makes it fall behind.
+            val predicted = strikeT + interval
+            interval -= config.phaseCorrection * cue.asyncTo(predicted)
+            interval = interval.coerceAtLeast(60.0 / (targetCadenceSpm * (1 + config.abilityHeadroomPct)))
+        }
+        return interval
+    }
+
+    /** The audible beat grid as heard so far, in seconds since the walker started. */
+    private class HeardCue(val beats: List<Double>, val periodSec: Double) {
+        /** t − nearest beat (extrapolating the grid past the last heard beat), wrapped to ±period/2. */
+        fun asyncTo(t: Double): Double {
+            val last = beats.last()
+            val nearest = if (t > last) {
+                last + Math.round((t - last) / periodSec) * periodSec
+            } else {
+                beats.minBy { kotlin.math.abs(it - t) }
+            }
+            return t - nearest
+        }
+    }
+
+    private fun heardCue(): HeardCue? {
+        val src = beatSource ?: return null
+        val beats = src().map { (it - startNanos) / 1e9 }.filter { it <= nowSec }.takeLast(8)
+        if (beats.size < 3) return null
+        val intervals = beats.zipWithNext { a, b -> b - a }.takeLast(4).sorted()
+        val period = intervals[intervals.size / 2]
+        if (period <= 0.0 || nowSec - beats.last() > 2 * period) return null // the cue has stopped
+        return HeardCue(beats, period)
     }
 
     private fun inFreeze(ts: Double): Boolean =

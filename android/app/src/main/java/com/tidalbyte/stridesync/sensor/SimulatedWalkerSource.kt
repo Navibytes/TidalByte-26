@@ -25,6 +25,14 @@ class SimulatedWalkerSource(
     @Volatile
     private var targetCadence = config.cadenceSpm
 
+    /** Heard times of audible cue beats, for entrainment (see [SimulatedWalker.beatSource]). */
+    @Volatile
+    var beatSource: (() -> List<Long>)? = null
+        set(value) {
+            field = value
+            walker?.beatSource = value
+        }
+
     /** Changes the walker's cadence while it runs. It eases toward the new value over a few steps. */
     fun setCadence(spm: Double) {
         targetCadence = spm
@@ -34,6 +42,7 @@ class SimulatedWalkerSource(
     override fun samples(): Flow<AccelSample> = flow {
         val w = SimulatedWalker(config, startNanos = clockNanos())
         w.targetCadenceSpm = targetCadence
+        w.beatSource = beatSource
         walker = w
         while (true) {
             val now = clockNanos()

@@ -26,8 +26,9 @@ import com.tidalbyte.stridesync.cue.CueOutput
  */
 class MetronomeEngine : CueOutput {
 
-    /** A placed beat. [tNanos] is the predicted time the beat is heard, elapsedRealtime nanos. */
-    data class Beat(val index: Long, val frame: Long, val tNanos: Long)
+    /** A placed beat. [tNanos] is its comparison time in elapsedRealtime nanos (DAC presentation +
+     *  OUTPUT_LATENCY_MS). [audible] is false for beats placed while muted. */
+    data class Beat(val index: Long, val frame: Long, val tNanos: Long, val audible: Boolean)
 
     private val sr = Tuning.AUDIO_SAMPLE_RATE
     private val lock = Any()
@@ -126,6 +127,12 @@ class MetronomeEngine : CueOutput {
 
     override fun recentBeatTimes(): List<Long> = synchronized(lock) { recent.map { frameToElapsedNanosLocked(it.frame) } }
 
+    /** When the recent audible beats actually reach the ear (elapsedRealtime ns): comparison time minus the
+     *  detector lag that OUTPUT_LATENCY_MS includes. Feeds the simulated walker's entrainment. */
+    fun audibleBeatsHeardNs(): List<Long> = synchronized(lock) {
+        recent.filter { it.audible }.map { frameToElapsedNanosLocked(it.frame) - Tuning.DETECTOR_LAG_MS * 1_000_000L }
+    }
+
     fun setSound(s: CueSound) {
         sound = s
         synchronized(lock) { clock?.sound = sounds.getValue(s) }
@@ -170,7 +177,7 @@ class MetronomeEngine : CueOutput {
                     synchronized(lock) {
                         val c = clock ?: return
                         c.render(written, fbuf, chunk) { frame ->
-                            val beat = Beat(c.beatCount, frame, frameToElapsedNanosLocked(frame))
+                            val beat = Beat(c.beatCount, frame, frameToElapsedNanosLocked(frame), c.gain > 0f)
                             recent.addLast(beat)
                             if (recent.size > RECENT_BEATS) recent.removeFirst()
                             placed += beat

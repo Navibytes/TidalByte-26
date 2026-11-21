@@ -1,34 +1,19 @@
 package com.tidalbyte.stridesync.session
 
 import com.tidalbyte.stridesync.Tuning
-import com.tidalbyte.stridesync.cue.Coupling
 import com.tidalbyte.stridesync.cue.CueOutput
+import com.tidalbyte.stridesync.cue.CueState
 import com.tidalbyte.stridesync.cue.PhaseLockedLoop
+import com.tidalbyte.stridesync.cue.RampController
+import com.tidalbyte.stridesync.cue.RampTiming
 import com.tidalbyte.stridesync.cue.SyncStats
 import com.tidalbyte.stridesync.cue.SyncTracker
+import com.tidalbyte.stridesync.cue.syncWindowNs
 import com.tidalbyte.stridesync.gait.CadenceEstimator
 import com.tidalbyte.stridesync.gait.GaitStats
 import com.tidalbyte.stridesync.gait.StepDetector
 import com.tidalbyte.stridesync.sensor.AccelSample
 import kotlin.math.abs
-
-/** How the cue tempo is chosen. Temporary dev modes; RampController (M4) replaces them. */
-enum class CueMode(val label: String) {
-    /** Lock to the walker: silent until a cadence is known, then a muted fast acquisition, then audible
-     *  with strong coupling. The beat follows the walker. */
-    LOCK("Lock to walker"),
-
-    /** A fixed tempo from the UI with weak, phase-only coupling. The beat leads (as it will in RAMPING). */
-    FIXED("Fixed tempo"),
-}
-
-/** Where LOCK mode is in its startup. */
-enum class LockPhase(val label: String) {
-    WAITING("Waiting for steps"),
-    ACQUIRING("Finding the beat"),
-    LOCKED("Locked"),
-    LEADING("Leading"),
-}
 
 /** One processed step, for logging and the UI. */
 data class StepReport(
@@ -39,146 +24,115 @@ data class StepReport(
     val errorMs: Double?,
     val shiftMs: Double?,
     val cueBpm: Double,
-    val phase: LockPhase,
+    val state: CueState,
     val coupling: String?,
 )
 
 /**
  * The per-sample pipeline: StepDetector → CadenceEstimator → PhaseLockedLoop → [CueOutput], plus sync
- * metrics. Pure Kotlin. It runs the same on the device (fed from a SensorSource, driving MetronomeEngine)
- * and in JVM closed-loop tests (driving a virtual BeatClock).
+ * metrics, all driven by the [RampController] state machine. Pure Kotlin. It runs the same on the device
+ * (fed from a SensorSource, driving MetronomeEngine) and in JVM closed-loop tests (driving a virtual
+ * BeatClock).
  *
- * Not thread-safe except for [mode] and [fixedBpm], which the UI may set from any thread. They take
- * effect on the next sample.
+ * Every tempo it sends to the cue passes through [RampController.capBpm]. Not thread-safe: call from one
+ * thread.
  */
 class GaitCuePipeline(
     private val cue: CueOutput,
+    timing: RampTiming = RampTiming(),
     private val log: (component: String, msg: String) -> Unit = { _, _ -> },
 ) {
-    @Volatile var mode: CueMode = CueMode.LOCK
-    @Volatile var fixedBpm: Double = Tuning.CUE_DEFAULT_BPM
-
     private val detector = StepDetector()
     private val cadence = CadenceEstimator()
     private val pll = PhaseLockedLoop()
     private val sync = SyncTracker()
+    val ramp = RampController(timing, log)
 
-    private var appliedMode: CueMode? = null
-    private var appliedFixedBpm = Double.NaN
-    private var acquireStreak = 0
-
-    var phase: LockPhase = LockPhase.WAITING
-        private set
+    private var appliedCommand = 0
+    private var appliedSyncReset = 0
 
     val gaitStats: GaitStats get() = cadence.stats()
     val syncStats: SyncStats get() = sync.stats()
     val cueBpm: Double get() = 60e9 / cue.periodNs
 
-    fun onSample(s: AccelSample): List<StepReport> {
-        applyMode()
-        val steps = detector.process(s)
-        if (steps.isEmpty()) return emptyList()
-        val out = ArrayList<StepReport>(steps.size)
-        for (step in steps) {
-            if (!cadence.addStep(step.tNanos)) continue
-            out += onStep(step.tNanos, step.amplitude)
-        }
-        return out
+    init {
+        cue.setMuted(ramp.muted) // CALIBRATING is silent
     }
 
-    private fun applyMode() {
-        val m = mode
-        if (m != appliedMode) {
-            log("cue", "mode ${appliedMode ?: "-"} → $m")
-            appliedMode = m
-            appliedFixedBpm = Double.NaN
-            acquireStreak = 0
-            sync.clearRolling()
-            when (m) {
-                CueMode.LOCK -> {
-                    val spm = cadence.stats().spm
-                    cue.setMuted(true)
-                    if (spm != null) cue.setPeriodNs(60e9 / spm)
-                    phase = if (spm != null) LockPhase.ACQUIRING else LockPhase.WAITING
-                }
-                CueMode.FIXED -> {
-                    cue.setMuted(false)
-                    phase = LockPhase.LEADING
-                }
-            }
+    fun onSample(s: AccelSample): List<StepReport> {
+        var out: MutableList<StepReport>? = null
+        for (step in detector.process(s)) {
+            if (!cadence.addStep(step.tNanos)) continue
+            (out ?: ArrayList<StepReport>(1).also { out = it }).add(onStep(step.tNanos, step.amplitude))
         }
-        if (m == CueMode.FIXED && fixedBpm != appliedFixedBpm) {
-            appliedFixedBpm = fixedBpm
-            cue.setPeriodNs(60e9 / fixedBpm)
-            sync.clearRolling()
-        }
+        ramp.onTick(s.tNanos, cadence.stats().lastStepNanos, cueBpm)
+        applyRamp()
+        return out ?: emptyList()
     }
 
     private fun onStep(tNanos: Long, amplitude: Double): StepReport {
         val gait = cadence.stats()
-        var coupling: Coupling? = null
+        val coupling = ramp.coupling
+        val periodBefore = cue.periodNs
+        var errorNs: Long? = null
+        var shiftNs: Long? = null
 
-        when (phase) {
-            LockPhase.WAITING -> if (gait.spm != null) {
-                cue.setPeriodNs(60e9 / gait.spm) // muted, so this applies immediately
-                phase = LockPhase.ACQUIRING
-                log("cue", "cadence %.1f spm → acquiring".format(gait.spm))
-            }
-            LockPhase.ACQUIRING -> coupling = Coupling.ACQUIRE
-            LockPhase.LOCKED -> {
-                val spm = gait.spm
-                val cuePeriod = cue.periodNs
-                if (spm != null && abs(60e9 / spm - cuePeriod) / cuePeriod > Tuning.PLL_FREQ_RESET_PCT) {
-                    // A large frequency error: jump the tempo target to the cadence (slewed per beat).
-                    // Skip the PI update this step.
-                    log("pll", "freq reset %.1f → %.1f bpm".format(60e9 / cuePeriod, spm))
-                    cue.setPeriodNs(60e9 / spm)
-                    sync.clearRolling()
-                } else {
-                    coupling = Coupling.LOCK
-                }
-            }
-            LockPhase.LEADING -> coupling = Coupling.LEAD
-        }
-
-        var errorMs: Double? = null
-        var shiftMs: Double? = null
         if (coupling != null) {
-            val periodBefore = cue.periodNs
             val c = pll.onStep(tNanos, cue.recentBeatTimes(), periodBefore, coupling)
             if (c != null) {
-                errorMs = c.errorNs / 1e6
-                shiftMs = c.shiftNs / 1e6
+                errorNs = c.errorNs
+                shiftNs = c.shiftNs
                 cue.requestPhaseShiftNs(c.shiftNs)
-                if (c.periodNs != periodBefore) cue.setPeriodNs(c.periodNs)
-                if (!cue.muted) sync.add(c.errorNs)
-
-                if (phase == LockPhase.ACQUIRING) {
-                    acquireStreak = if (abs(c.errorNs) <= Tuning.SYNC_WINDOW_MS * 1_000_000L) acquireStreak + 1 else 0
-                    if (acquireStreak >= Tuning.PLL_ACQUIRE_STEPS) {
-                        cue.setMuted(false)
-                        phase = LockPhase.LOCKED
-                        log("cue", "acquired lock at %.1f bpm → audible".format(60e9 / cue.periodNs))
-                    }
-                }
+                if (ramp.state == CueState.LOCKING) followTempo(gait, c.periodNs, periodBefore)
+                if (!cue.muted) sync.add(c.errorNs, periodBefore)
                 log(
                     "pll",
                     "err=%+.1fms shift=%+.1fms period=%.1f→%.1fms k=%s".format(
-                        errorMs, shiftMs, periodBefore / 1e6, c.periodNs / 1e6, coupling.name,
+                        c.errorNs / 1e6, c.shiftNs / 1e6, periodBefore / 1e6, cue.periodNs / 1e6, coupling.name,
                     ),
                 )
             }
         }
 
+        ramp.onStep(tNanos, gait, sync.stats(), errorNs, syncWindowNs(periodBefore), cueBpm)
+        applyRamp()
+
         return StepReport(
             tNanos = tNanos,
             amplitude = amplitude,
             gait = gait,
-            errorMs = errorMs,
-            shiftMs = shiftMs,
-            cueBpm = 60e9 / cue.periodNs,
-            phase = phase,
+            errorMs = errorNs?.let { it / 1e6 },
+            shiftMs = shiftNs?.let { it / 1e6 },
+            cueBpm = cueBpm,
+            state = ramp.state,
             coupling = coupling?.name,
         )
+    }
+
+    /** LOCKING only: the beat follows the walker's tempo through the PI integrator, or through a frequency
+     *  reset when the error is large. Either way it's capped. */
+    private fun followTempo(gait: GaitStats, pllPeriodNs: Double, periodBefore: Double) {
+        val spm = gait.spm
+        if (!ramp.acquiring && spm != null && abs(60e9 / spm - periodBefore) / periodBefore > Tuning.PLL_FREQ_RESET_PCT) {
+            log("pll", "freq reset %.1f → %.1f bpm".format(60e9 / periodBefore, spm))
+            cue.setPeriodNs(60e9 / ramp.capBpm(spm))
+            sync.clearRolling()
+        } else if (pllPeriodNs != periodBefore) {
+            cue.setPeriodNs(60e9 / ramp.capBpm(60e9 / pllPeriodNs))
+        }
+    }
+
+    /** Applies the ramp's mute state, any new tempo command, and any sync-window restart (after a tempo
+     *  change, a step-back settle, or a pause), so the next sync judgment covers only fresh steps. */
+    private fun applyRamp() {
+        if (ramp.muted != cue.muted) cue.setMuted(ramp.muted)
+        if (ramp.commandVersion != appliedCommand) {
+            appliedCommand = ramp.commandVersion
+            ramp.commandedBpm?.let { cue.setPeriodNs(60e9 / it) }
+        }
+        if (ramp.syncResetVersion != appliedSyncReset) {
+            appliedSyncReset = ramp.syncResetVersion
+            sync.clearRolling()
+        }
     }
 }

@@ -9,7 +9,6 @@ import androidx.lifecycle.viewModelScope
 import com.tidalbyte.stridesync.audio.CueSound
 import com.tidalbyte.stridesync.sensor.SimulatedWalkerSource
 import com.tidalbyte.stridesync.sensor.WalkerConfig
-import com.tidalbyte.stridesync.session.CueMode
 import com.tidalbyte.stridesync.session.SessionController
 
 /** Hosts the SessionController for now. Milestone 5 moves it into CueService so it survives screen-off. */
@@ -20,9 +19,7 @@ class MainViewModel : ViewModel() {
 
     var simCadence by mutableFloatStateOf(WalkerConfig.PARKINSONIAN.cadenceSpm.toFloat())
         private set
-    var cueMode by mutableStateOf(CueMode.LOCK)
-        private set
-    var fixedBpm by mutableFloatStateOf(Tuning.CUE_DEFAULT_BPM.toFloat())
+    var walkerEntrains by mutableStateOf(true)
         private set
     var cueSound by mutableStateOf(CueSound.CLICK)
         private set
@@ -30,13 +27,12 @@ class MainViewModel : ViewModel() {
     private var simSource: SimulatedWalkerSource? = null
 
     init {
-        controller.setCueMode(cueMode)
-        controller.setFixedBpm(fixedBpm.toDouble())
         controller.setCueSound(cueSound)
     }
 
     fun start() {
-        val src = SimulatedWalkerSource(WalkerConfig.PARKINSONIAN.copy(cadenceSpm = simCadence.toDouble()))
+        val cfg = WalkerConfig.PARKINSONIAN.copy(cadenceSpm = simCadence.toDouble(), entrains = walkerEntrains)
+        val src = SimulatedWalkerSource(cfg)
         simSource = src
         controller.start(src)
     }
@@ -51,14 +47,9 @@ class MainViewModel : ViewModel() {
         simSource?.setCadence(spm.toDouble())
     }
 
-    fun updateCueMode(mode: CueMode) {
-        cueMode = mode
-        controller.setCueMode(mode)
-    }
-
-    fun updateFixedBpm(bpm: Float) {
-        fixedBpm = bpm
-        controller.setFixedBpm(bpm.toDouble())
+    /** Takes effect at the next Start. */
+    fun updateWalkerEntrains(on: Boolean) {
+        walkerEntrains = on
     }
 
     fun updateCueSound(sound: CueSound) {

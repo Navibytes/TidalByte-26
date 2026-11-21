@@ -3,9 +3,13 @@ package com.tidalbyte.stridesync.cue
 import com.tidalbyte.stridesync.Tuning
 import kotlin.math.abs
 
+/** The in-sync window for a given beat period, ns: ±max(SYNC_WINDOW_MS, SYNC_WINDOW_PERIOD_PCT × period). */
+fun syncWindowNs(periodNs: Double): Long =
+    maxOf(Tuning.SYNC_WINDOW_MS * 1_000_000L, (Tuning.SYNC_WINDOW_PERIOD_PCT * periodNs).toLong())
+
 /** Sync metrics, rolling and cumulative. Null values mean no steps have been recorded yet. */
 data class SyncStats(
-    /** Fraction of the last [Tuning.SYNC_ROLLING_STEPS] steps within ±[Tuning.SYNC_WINDOW_MS]. */
+    /** Fraction of the last [Tuning.SYNC_ROLLING_STEPS] steps within the sync window ([syncWindowNs]). */
     val rollingPct: Double? = null,
     /** Mean |asynchrony| over the rolling window, ms. */
     val rollingMeanAbsMs: Double? = null,
@@ -23,18 +27,21 @@ data class SyncStats(
 
 /** Accumulates step-vs-beat errors. Record only steps measured against an audible cue. Pure Kotlin. */
 class SyncTracker(private val window: Int = Tuning.SYNC_ROLLING_STEPS) {
-    private val windowNs = Tuning.SYNC_WINDOW_MS * 1_000_000L
-    private val recent = ArrayDeque<Long>()
+    private class Entry(val errorNs: Long, val inSync: Boolean)
+
+    private val recent = ArrayDeque<Entry>()
     private var count = 0
     private var inWindow = 0
     private var sumAbsNs = 0.0
     private var sumNs = 0.0
 
-    fun add(errorNs: Long) {
-        recent.addLast(errorNs)
+    /** Records one step's error against a beat of period [periodNs] (the period sets the window). */
+    fun add(errorNs: Long, periodNs: Double) {
+        val ok = abs(errorNs) <= syncWindowNs(periodNs)
+        recent.addLast(Entry(errorNs, ok))
         if (recent.size > window) recent.removeFirst()
         count++
-        if (abs(errorNs) <= windowNs) inWindow++
+        if (ok) inWindow++
         sumAbsNs += abs(errorNs).toDouble()
         sumNs += errorNs.toDouble()
     }
@@ -42,8 +49,8 @@ class SyncTracker(private val window: Int = Tuning.SYNC_ROLLING_STEPS) {
     fun stats(): SyncStats {
         if (count == 0) return SyncStats()
         return SyncStats(
-            rollingPct = recent.count { abs(it) <= windowNs }.toDouble() / recent.size,
-            rollingMeanAbsMs = recent.sumOf { abs(it).toDouble() } / recent.size / 1e6,
+            rollingPct = if (recent.isEmpty()) null else recent.count { it.inSync }.toDouble() / recent.size,
+            rollingMeanAbsMs = if (recent.isEmpty()) null else recent.sumOf { abs(it.errorNs).toDouble() } / recent.size / 1e6,
             sessionPct = inWindow.toDouble() / count,
             sessionMeanAbsMs = sumAbsNs / count / 1e6,
             sessionMeanSignedMs = sumNs / count / 1e6,

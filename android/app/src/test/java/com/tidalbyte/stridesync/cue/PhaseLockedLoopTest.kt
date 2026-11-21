@@ -103,7 +103,7 @@ class PhaseLockedLoopTest {
     @Test
     fun syncTracker_metrics() {
         val t = SyncTracker(window = 4)
-        listOf(10L, -20L, 70L, -100L, 30L).forEach { t.add(it * ms) } // 60 ms window
+        listOf(10L, -20L, 70L, -100L, 30L).forEach { t.add(it * ms, 600.0 * ms) } // 600 ms period → ±60 ms window
         val s = t.stats()
         assertEquals(5, s.count)
         assertEquals(3.0 / 5, s.sessionPct!!, 1e-9)
@@ -112,8 +112,19 @@ class PhaseLockedLoopTest {
         assertEquals(2.0 / 4, s.rollingPct!!, 1e-9) // the last 4: -20, 70, -100, 30
         assertEquals(55.0, s.rollingMeanAbsMs!!, 1e-9)
         t.clearRolling()
-        t.add(0)
+        t.add(0, 600.0 * ms)
         assertEquals(1.0, t.stats().rollingPct!!, 1e-9)
         assertEquals(6, t.stats().count)
+    }
+
+    @Test
+    fun syncWindow_scalesWithTempo() {
+        assertEquals(60 * ms, syncWindowNs(600.0 * ms)) // 100 bpm: the 60 ms floor
+        assertEquals(60 * ms, syncWindowNs(750.0 * ms)) // 80 bpm: 8% = 60 ms
+        assertEquals(80 * ms, syncWindowNs(1000.0 * ms)) // 60 bpm: ±80 ms
+        val t = SyncTracker()
+        t.add(75 * ms, 1000.0 * ms) // in sync at 60 bpm…
+        t.add(75 * ms, 600.0 * ms) // …but not at 100 bpm
+        assertEquals(0.5, t.stats().sessionPct!!, 1e-9)
     }
 }
