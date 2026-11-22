@@ -56,6 +56,8 @@ data class LiveState(
     val recordingName: String? = null,
     /** Set if the source failed (e.g. no accelerometer). */
     val error: String? = null,
+    /** The phone isn't playing our audio (see MetronomeEngine.outputStalled). */
+    val audioStalled: Boolean = false,
 )
 
 /**
@@ -168,6 +170,7 @@ class SessionController(private val scope: CoroutineScope) {
                                 syncPct = sy.rollingPct,
                                 meanAbsAsyncMs = sy.rollingMeanAbsMs,
                                 recentEvents = if (newEvents) ramp.events.takeLast(4).reversed() else it.recentEvents,
+                                audioStalled = eng.outputStalled,
                             )
                         }
                     }

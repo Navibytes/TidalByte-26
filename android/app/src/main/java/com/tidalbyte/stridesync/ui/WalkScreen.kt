@@ -1,6 +1,7 @@
 package com.tidalbyte.stridesync.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -124,6 +125,8 @@ private fun WalkContent(
 
         Spacer(Modifier.height(if (state.running) 18.dp else 26.dp))
         if (!state.running) {
+            SourceRow(vm, onOpenSettings)
+            Spacer(Modifier.height(12.dp))
             FilledPill("Start walk", SsIcons.Play, onStart, Modifier.fillMaxWidth(), enabled = vm.canStart, height = 68.dp, fontSize = 21f)
             Spacer(Modifier.height(12.dp))
         }
@@ -138,7 +141,7 @@ private fun WalkContent(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "${sourceLine(vm)} · Prototype — not a medical device.",
+            "Prototype — not a medical device.",
             modifier = Modifier.fillMaxWidth(),
             fontSize = 12.5.sp,
             color = Ss.Faint,
@@ -253,6 +256,25 @@ private fun LiveCard(vm: MainViewModel, state: LiveState) {
             Spacer(Modifier.height(6.dp))
             Text("Recording raw samples to $it", fontSize = 12.5.sp, color = Ss.Faint)
         }
+        if (state.audioStalled) {
+            Spacer(Modifier.height(12.dp))
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Ss.Pink)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+            ) {
+                Text("The phone isn't playing the beat", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Ss.RedDeep)
+                Text(
+                    "Another app is holding the sound, often screen mirroring (scrcpy) or a screen recording with audio. " +
+                        "Stop it; the beat comes back by itself.",
+                    fontSize = 13.5.sp,
+                    color = Ss.Ink,
+                    lineHeight = 18.sp,
+                )
+            }
+        }
         state.error?.let {
             Spacer(Modifier.height(6.dp))
             Text("Error: $it", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ss.Red)
@@ -317,10 +339,33 @@ private fun startHint(vm: MainViewModel, state: LiveState): String = when {
     }
 }
 
-private fun sourceLine(vm: MainViewModel): String = when (vm.sourceKind) {
-    SourceKind.SIMULATED -> "Practice walker"
-    SourceKind.LIVE -> "Phone sensor"
-    SourceKind.REPLAY -> "Replay"
+/** Where the steps come from, always visible above Start (a hidden simulated source looks like a stuck app). */
+@Composable
+private fun SourceRow(vm: MainViewModel, onOpenSettings: () -> Unit) {
+    val (title, detail) = when (vm.sourceKind) {
+        SourceKind.LIVE -> "Your phone" to "Wear it at your ${vm.placement.label.lowercase()}"
+        SourceKind.SIMULATED -> "Practice walker" to "Simulated steps at %.0f steps/min, not yours".format(vm.simCadence)
+        SourceKind.REPLAY -> "Recorded walk" to (vm.selectedReplay?.name ?: "None chosen")
+    }
+    val demo = vm.sourceKind != SourceKind.LIVE
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (demo) Ss.Pink else Ss.Card)
+            .clickable(onClick = onOpenSettings)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(if (demo) SsIcons.Settings else SsIcons.Walk, null, tint = if (demo) Ss.Red else Ss.Ink, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Steps from: $title", fontSize = 15.5.sp, fontWeight = FontWeight.Bold, color = Ss.Ink)
+            Text(detail, fontSize = 13.5.sp, fontWeight = FontWeight.Medium, color = if (demo) Ss.RedDeep else Ss.Muted, maxLines = 1)
+        }
+        Text("Change", fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, color = Ss.RedDeep)
+        Icon(SsIcons.ChevronRight, null, tint = Ss.RedDeep, modifier = Modifier.size(18.dp))
+    }
 }
 
 private fun stateTitle(s: LiveState): String = when {

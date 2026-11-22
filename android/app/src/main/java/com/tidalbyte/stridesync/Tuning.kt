@@ -308,6 +308,10 @@ object Tuning {
     const val DEMO_STEP_BACK_SETTLE_SEC = 6.0
     const val DEMO_SYNC_ROLLING_STEPS = 8
 
+    /** The playback head not moving for this long while playing = the audio output is stalled (warn in the UI).
+     *  Normal playback advances it every few ms. */
+    const val AUDIO_STALL_MS = 1500L
+
     // ───────────────────────── Music cue: the smooth profile ─────────────────────────
     // With a song as the cue, every per-beat timing change is a tempo/pitch wobble (with a click it's invisible).
     // The walker entrains to the music themselves, so smooth tempo beats snapping the phase onto each step. On real

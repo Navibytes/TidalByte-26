@@ -27,7 +27,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val state = SessionHub.state
 
-    var sourceKind by mutableStateOf(SourceKind.SIMULATED)
+    var sourceKind by mutableStateOf(SourceKind.LIVE) // the phone's own sensor; the practice walker is in settings
         private set
     var simCadence by mutableFloatStateOf(WalkerConfig.PARKINSONIAN.cadenceSpm.toFloat())
         private set
@@ -35,7 +35,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var record by mutableStateOf(true)
         private set
-    var placement by mutableStateOf(Placement.POCKET)
+    var placement by mutableStateOf(Placement.LOWER_BACK) // the recommended spot (best sync in tests)
         private set
     var replays by mutableStateOf(emptyList<ReplayRef>())
         private set

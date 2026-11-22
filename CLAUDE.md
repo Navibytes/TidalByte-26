@@ -231,6 +231,9 @@ Built to the user's mockups of the Walk and Profile screens. Music and History f
   - **Walk:**
     - Header and greeting; "Your natural pace" card (fake, with a 3-walk-average sparkline).
     - Ramp/Follow cards; Click/Woodblock/Music tiles; a song card (the real bundled song) when Music is picked.
+    - A **"Steps from"** row above Start always shows the source. The default is the phone at the lower back; the
+      row turns pink for the practice walker. Tapping it opens settings. A hidden simulated source once looked
+      like a "stuck at 90 spm" app.
     - Start walk.
     - While running, the pace card becomes a live card: state, spm vs beat bpm, in step, the practice-walker slider,
       and recent events. The mode cards hide and **Stop walk** is pinned above the nav.
@@ -268,7 +271,7 @@ session:    { id, startedAt, durationSec, baselineSpm, finalSpm, peakSpm, meanCv
   - Deterministic for a given day (`SEED_TODAY=YYYY-MM-DD`).
 
 ## Demo plan
-1. **Simulated walker** (the default source; change it via the sliders button on Walk):
+1. **Simulated walker** (the default source is the phone; pick "Practice walker" via the "Steps from" row):
    - Ramp + Demo timing: calibrate → lock → ramp → overreach → step-back in about 1 minute.
    - Follow mode + the cadence slider shows tracking.
    - Pick the **Music** cue sound to hear the song's tempo follow (on the phone it glided 92 → 114 bpm over about
@@ -334,5 +337,10 @@ change the detector filter, the output path (Bluetooth adds 150–300 ms) or the
 - **Mock data:** the portal's patients are fictional. Keep the "Demo data / fictional" labels.
 - **Music is copyrighted:** songs live only in gitignored folders and the locally built APK. Never commit them, and
   don't share that APK publicly. The repo is public.
+- **Audio capture stalls playback:** scrcpy, or a screen recording that captures audio, reroutes media to the
+  remote submix (shell uid 2000). If nothing drains it, the AudioTrack head freezes: silence, no beats placed,
+  and the cue stays muted forever. `MetronomeEngine.outputStalled` (head stuck for `AUDIO_STALL_MS`) shows a
+  warning on the live card. Diagnose with `adb shell dumpsys audio` (player "device updated deviceId", and
+  REMOTE_SUBMIX entries).
 - **Music makes timing changes audible:** any change to per-beat corrections needs checking with Music, not just
   the click. Measure the beat-to-beat tempo change of `cue.audibleBeatFrameTimes` (see GaitCuePipelineTest).

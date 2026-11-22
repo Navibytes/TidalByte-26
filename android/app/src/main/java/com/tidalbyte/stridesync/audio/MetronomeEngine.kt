@@ -61,6 +61,12 @@ class MetronomeEngine(
      *  cheap: hand off to another thread. */
     @Volatile var onBeat: ((Beat) -> Unit)? = null
 
+    /** True while Android accepts our audio but isn't playing it (the playback head stopped moving). Seen when
+     *  scrcpy or a screen recording captures media audio via the remote submix and stops draining it: nothing
+     *  is heard and no beats get placed. */
+    @Volatile var outputStalled: Boolean = false
+        private set
+
     val isRunning: Boolean get() = running
 
     fun start(initialBpm: Double) {
@@ -201,6 +207,8 @@ class MetronomeEngine(
         var lastTsPoll = 0L
         var lastStats = System.nanoTime()
         var lastBeatT = Long.MIN_VALUE
+        var lastHead = -1L
+        var headMovedNs = System.nanoTime()
 
         try {
             while (running) {
@@ -250,6 +258,19 @@ class MetronomeEngine(
                 }
 
                 val now = System.nanoTime()
+                if (playing) {
+                    if (head != lastHead) {
+                        lastHead = head
+                        headMovedNs = now
+                        if (outputStalled) {
+                            outputStalled = false
+                            SLog.i(TAG, "audio output resumed")
+                        }
+                    } else if (!outputStalled && now - headMovedNs > Tuning.AUDIO_STALL_MS * 1_000_000L) {
+                        outputStalled = true
+                        SLog.w(TAG, "audio output stalled: playback head stuck at $head for ${Tuning.AUDIO_STALL_MS} ms (screen mirroring/recording capturing audio?)")
+                    }
+                }
                 if (playing && now - lastTsPoll > TS_POLL_NS) {
                     lastTsPoll = now
                     if (track.getTimestamp(ts)) {
