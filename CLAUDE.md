@@ -21,6 +21,8 @@ runs locally on **mock data**; the app doesn't upload (milestone 6 was skipped).
   tracking rework driven by real recordings (see the Pipeline section and the Gotchas).
 - **Music cue:** a user-provided song as the cue, its tempo locked to the beat clock (see Audio). Follow + Music
   was retested live after the smooth music profile went in; the user reported it "worked great".
+- **App UI redesign** to the user's mockups (Walk and Profile screens): four tabs, a light-only theme, the Figtree
+  font. Walk history and profile stats are **fake** (see App UI).
 
 ## Stack
 - **Android:** Kotlin, Jetpack Compose, coroutines/Flow, `SensorManager`, `AudioTrack`.
@@ -49,7 +51,8 @@ android/app/src/main/java/com/tidalbyte/stridesync/
   session/  GaitCuePipeline (pure Kotlin: detector → cadence → PLL → ramp → cue), SessionController (Android
             wiring, LiveState), SessionHub (the process-wide controller + SourceSpec), SampleRecorder (CSV)
   service/  CueService (foreground service, type mediaPlayback)
-  ui/       HomeScreen (the only screen), Theme
+  ui/       StrideSyncApp (tabs + bottom nav), WalkScreen, MusicScreen, HistoryScreen, ProfileScreen, SettingsSheet,
+            Components, SsIcons (hand-drawn vectors), Theme (palette `Ss`, Figtree), DemoProfile (FAKE history)
   Tuning.kt every tunable constant, documented with units and rationale
   Log.kt    SLog: one tag "StrideSync", messages start with "[component]"
 android/app/src/test/      JVM tests: gait/, cue/, audio/, sensor/, session/ (closed-loop)
@@ -61,7 +64,7 @@ music/                     GITIGNORED: the user's song files (input). The curren
 android/app/src/main/assets/music/   GITIGNORED: the prepared song. A fresh clone has none; the Music chip is disabled
 ```
 Not built: `data/FirestoreRepo`, `SessionRecorder`/`SessionSummary`, `firebase/`, and separate
-LiveSession/Summary/Debug screens. The Record toggle lives on Home.
+LiveSession/Summary/Debug screens. The demo/testing controls live in the settings sheet (see App UI).
 
 ## Commands
 ```bash
@@ -107,7 +110,7 @@ which drive a virtual BeatClock. `SessionController` hosts it on a coroutine. `S
     phase correction (α 0.3), reduced drift while cued, and a hard ability ceiling (natural +6%), so an overreach is
     real. Deliberate pace (the slider) changes within a few steps.
   - **Follow mode:** the simulated walker uses strength 0.3 / α 0.05 so it leads.
-- **Recording:** a "Record raw samples" switch on Home (Live only). The Pocket / Lower back / Belt clip chip goes
+- **Recording:** a "Record raw samples" switch in the settings sheet (Phone source only). The Pocket / Lower back / Belt clip chip goes
   in the file name.
 
 ### 2. Step detection — `gait/StepDetector`
@@ -216,6 +219,33 @@ which drive a virtual BeatClock. `SessionController` hosts it on a coroutine. `S
 - `SessionSummary` and the upload aren't built (milestone 6 was skipped).
 - The session end logs one `[session]` line: state, baseline, ramp steps, sync %, mean asynchrony.
 
+## App UI (as built)
+Built to the user's mockups of the Walk and Profile screens. Music and History follow the same style.
+- **Look:** light only, even when the phone is in dark mode, with dark system-bar icons.
+  - Palette `Ss` in `Theme.kt`, sampled from the mockups: off-white `#FBFAF6`, beige cards `#F1EFE8`, cranberry
+    `#D33A50`, pink `#FDE4E8`, gold `#D9A441`, ink `#221618`.
+  - Font: Figtree, a bundled variable font (`res/font/figtree.ttf`, SIL OFL in `assets/licenses/`). Its default
+    instance is Light, so every weight sets the `wght` axis explicitly.
+  - Icons: drawn in `SsIcons`; there's no icon library.
+- **Tabs (bottom nav):**
+  - **Walk:**
+    - Header and greeting; "Your natural pace" card (fake, with a 3-walk-average sparkline).
+    - Ramp/Follow cards; Click/Woodblock/Music tiles; a song card (the real bundled song) when Music is picked.
+    - Start walk.
+    - While running, the pace card becomes a live card: state, spm vs beat bpm, in step, the practice-walker slider,
+      and recent events. The mode cards hide and **Stop walk** is pinned above the nav.
+    - The sliders button opens **SettingsSheet**: source (practice walker / phone / replay), the sim slider and
+      entrainment, placement, record CSV, demo timing.
+  - **Music:** the real song plus Click and Woodblock are selectable. "From your music" songs are **fake** (a toast).
+  - **History:** a natural-pace bar chart and a walk list, both **fake**.
+  - **Profile:** stats derived from the fake walks. Share opens the Android share sheet. "Share with my therapist"
+    is a **fake** toggle. Text size really rescales the text (Extra large = the design's sizes).
+- **Fake data, `DemoProfile`:** Eleanor V.'s 15 walks copied from the portal mock. Dates count back from today. Every
+  Profile and History number is derived from them, so the two screens agree. They differ slightly from the
+  mockup's numbers.
+- The cue sound resets to Click on each launch.
+- "Prototype — not a medical device." appears on Walk, Profile, History and the settings sheet.
+
 ## Data schema (mock data = the planned Firestore documents)
 ```
 patients[]: { id, displayName, createdAt, latestBaselineSpm, sessions[] }
@@ -238,7 +268,7 @@ session:    { id, startedAt, durationSec, baselineSpm, finalSpm, peakSpm, meanCv
   - Deterministic for a given day (`SEED_TODAY=YYYY-MM-DD`).
 
 ## Demo plan
-1. **Simulated walker:**
+1. **Simulated walker** (the default source; change it via the sliders button on Walk):
    - Ramp + Demo timing: calibrate → lock → ramp → overreach → step-back in about 1 minute.
    - Follow mode + the cadence slider shows tracking.
    - Pick the **Music** cue sound to hear the song's tempo follow (on the phone it glided 92 → 114 bpm over about

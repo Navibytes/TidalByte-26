@@ -48,8 +48,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var demoTiming by mutableStateOf(true)
         private set
 
-    /** "Title · 104 bpm" once a bundled song has loaded; null means the Music cue is unavailable. */
-    var songInfo by mutableStateOf<String?>(null)
+    /** The bundled song once loaded; null means the Music cue is unavailable. */
+    var song by mutableStateOf<SongMeta?>(null)
+        private set
+
+    /** FAKE (Profile): nothing is uploaded; milestone 6 was skipped. */
+    var shareWithTherapist by mutableStateOf(true)
+        private set
+
+    /** Profile → Text size. Extra large is the size the design was drawn at. */
+    var textSize by mutableStateOf(TextSize.EXTRA_LARGE)
         private set
 
     val canStart: Boolean get() = sourceKind != SourceKind.REPLAY || selectedReplay != null
@@ -59,7 +67,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refreshReplays()
         viewModelScope.launch {
             val song = withContext(Dispatchers.IO) { SessionHub.loadSong(getApplication()) }
-            songInfo = song?.let { "%s · %.0f bpm".format(it.title, it.bpm) }
+            this@MainViewModel.song = song?.let { SongMeta(it.title, it.bpm) }
         }
     }
 
@@ -128,4 +136,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         cueSound = sound
         SessionHub.setCueSound(sound)
     }
+
+    fun updateShareWithTherapist(on: Boolean) {
+        shareWithTherapist = on
+    }
+
+    fun cycleTextSize() {
+        textSize = TextSize.entries[(textSize.ordinal + 1) % TextSize.entries.size]
+    }
+}
+
+data class SongMeta(val title: String, val bpm: Double) {
+    /** "Stayin' Alive (Instrumental)" → "Stayin' Alive", to fit one line. */
+    val shortTitle: String get() = title.substringBefore(" (").ifBlank { title }
+}
+
+/** Multiplies the system font scale. The design's sizes are "Extra large"; smaller steps shrink from there. */
+enum class TextSize(val label: String, val scale: Float) {
+    NORMAL("Normal", 0.88f),
+    LARGE("Large", 0.94f),
+    EXTRA_LARGE("Extra large", 1f),
 }
